@@ -17,7 +17,7 @@ Each step below is one request to Claude Code. Do them in order. Finish and play
 
 ## Track 1 (from the drawing)
 
-Counterclockwise, start line on the left straight.
+Cars drive up the left straight (clockwise seen from above, following the arrow on the drawing). Start line on the left straight.
 
 | Feature | Where | Rule |
 |---|---|---|
