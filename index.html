@@ -26,13 +26,22 @@
   .car.p1{border-color:var(--p1)} .car.p2{border-color:var(--p2)}
   .car .name{font-family:var(--display);font-size:14px;letter-spacing:.04em}
   .car .keys{color:var(--muted);font-size:12px}
-  .car .lap{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums}
-  .car .time{color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
+  .car .time{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums}
   .wrap{position:relative;width:min(100%,900px);max-width:100%;aspect-ratio:900/480;background:#000;border-radius:12px;overflow:hidden}
   canvas{display:block;width:100%;height:100%}
   .divider{position:absolute;left:50%;top:0;bottom:0;width:4px;background:var(--bg);transform:translateX(-50%)}
   .overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:rgba(16,20,24,.72);text-align:center;padding:0 16px}
-  .overlay[hidden],.divider[hidden]{display:none}
+  .overlay[hidden],.divider[hidden],.pane[hidden]{display:none}
+  /* Per-player layers drawn over each half of the canvas: lap counter at the top, big messages in the middle */
+  .pane{position:absolute;top:0;bottom:0;width:50%;pointer-events:none;display:flex;align-items:center;justify-content:center}
+  .pane.left{left:0} .pane.right{right:0}
+  .pane .hud{position:absolute;top:10px;left:50%;transform:translateX(-50%);font-family:var(--display);font-size:clamp(13px,2.2vw,20px);letter-spacing:.04em;color:#fff;text-shadow:0 2px 6px rgba(0,0,0,.6);background:rgba(16,20,24,.45);padding:4px 12px;border-radius:999px;white-space:nowrap}
+  .pane .big{font-family:var(--display);font-size:clamp(28px,7vw,72px);color:#fff;text-shadow:0 4px 16px rgba(0,0,0,.6);text-align:center;line-height:1;padding:0 8px}
+  .pane .big.go{color:#7cfc7c}
+  .pane .big.first{color:#ffd54a}
+  .pane .big.second{color:#cfd8e3}
+  /* Once the race-over panel is up, tuck the place text under the lap pill so it doesn't cover the panel */
+  .wrap.finished .pane .big{position:absolute;top:48px;font-size:clamp(18px,3.4vw,34px)}
   .overlay h2{font-family:var(--display);font-size:clamp(24px,6vw,44px);margin:0}
   .overlay p{margin:0;color:var(--muted);max-width:40ch}
   button{font-family:var(--display);font-size:16px;letter-spacing:.04em;background:var(--fg);color:var(--bg);border:0;border-radius:8px;padding:12px 22px;cursor:pointer}
@@ -43,8 +52,8 @@
 <body>
 <h1>Accelerate</h1>
 <div class="board">
-  <div class="car p1"><div class="name">RED</div><div class="keys">W A S D · left screen</div><div class="lap" id="lap1">Lap 1 / 3</div><div class="time" id="time1">0.00s</div></div>
-  <div class="car p2"><div class="name">BLUE</div><div class="keys">↑ ← ↓ → · right screen</div><div class="lap" id="lap2">Lap 1 / 3</div><div class="time" id="time2">0.00s</div></div>
+  <div class="car p1"><div class="name">RED</div><div class="keys">W A S D · left screen</div><div class="time" id="time1">0.00s</div></div>
+  <div class="car p2"><div class="name">BLUE</div><div class="keys">↑ ← ↓ → · right screen</div><div class="time" id="time2">0.00s</div></div>
 </div>
 <div class="wrap">
   <canvas id="c"></canvas>
@@ -54,6 +63,8 @@
     <p id="omsg">First to finish 3 laps wins. Stay on the road: grass is slow.</p>
     <button id="start">Start race</button>
   </div>
+  <div class="pane left" id="pane1"><div class="hud" id="lap1">LAP 1 / 3</div><div class="big" id="big1"></div></div>
+  <div class="pane right" id="pane2"><div class="hud" id="lap2">LAP 1 / 3</div><div class="big" id="big2"></div></div>
 </div>
 <p class="hint">Click the track first so it hears your keys. Each player gets their own camera. Press M for the overhead map.</p>
 
@@ -87,7 +98,9 @@
   // Size of the drawing page in world units (portrait page, 3:4).
   const PAGE_W=240, PAGE_H=320;
 
-  const TRACK=TRACK1, LAPS=TRACK.laps, CPS=4;
+  const TRACK=TRACK1, CPS=4;
+  // Laps to win: the track's setting, unless the address ends in ?laps=5 (handy for quick races)
+  const LAPS=parseInt(new URLSearchParams(location.search).get('laps'))||TRACK.laps;
 
   // ===================== RENDERER + SCENE =====================
   const cv=document.getElementById('c');
@@ -210,7 +223,7 @@
   addEventListener('keydown',e=>{
     keys[e.code]=true;
     if(e.code.startsWith('Arrow')) e.preventDefault();
-    if(e.code==='KeyM'&&!e.repeat){ overhead=!overhead; document.getElementById('divider').hidden=overhead; }
+    if(e.code==='KeyM'&&!e.repeat){ overhead=!overhead; for(const id of ['divider','pane1','pane2']) document.getElementById(id).hidden=overhead; }
   });
   addEventListener('keyup',e=>{keys[e.code]=false;});
 
@@ -227,7 +240,18 @@
     }
   }
 
-  let running=false, winner=null, last=0;
+  // ===================== RACE STATE =====================
+  // idle -> countdown (3, 2, 1) -> racing (GO!) -> finished (both cars done)
+  let state='idle', countdown=0, goTimer=0, finished=[], last=0;
+  const big=[document.getElementById('big1'),document.getElementById('big2')];
+  function setBig(c,text,cls){ const el=big[cars.indexOf(c)]; el.textContent=text; el.className='big '+cls; }
+  function carFinished(c){
+    finished.push(c);
+    const place=finished.length;
+    setBig(c, place===1?'FIRST PLACE!':'SECOND PLACE', place===1?'first':'second');
+    if(finished.length===cars.length) setTimeout(endRace,1500);
+  }
+
   function step(dt){
     for(const c of cars){
       if(c.done) continue;
@@ -247,7 +271,7 @@
       c.mesh.rotation.y=-c.a+Math.PI/2;
       // Lap counting: the lap is split into CPS sectors that must be passed in order.
       const s=Math.floor(near.i*CPS/N);
-      if(s===(c.cp+1)%CPS){ c.cp=s; if(s===0){ c.lap++; if(c.lap>LAPS){c.done=true;c.finishTime=c.time;c.lap=LAPS; if(!winner){winner=c;endRace();}} } }
+      if(s===(c.cp+1)%CPS){ c.cp=s; if(s===0){ c.lap++; if(c.lap>LAPS){ c.done=true; c.finishTime=c.time; c.lap=LAPS; carFinished(c); } } }
       updateCam(c,false);
     }
     // simple car-vs-car bump
@@ -288,28 +312,47 @@
         renderer.render(scene,c.cam);
       });
     }
-    document.getElementById('lap1').textContent=`Lap ${cars[0].lap} / ${LAPS}`;
-    document.getElementById('lap2').textContent=`Lap ${cars[1].lap} / ${LAPS}`;
-    document.getElementById('time1').textContent=(cars[0].done?cars[0].finishTime:cars[0].time).toFixed(2)+'s';
-    document.getElementById('time2').textContent=(cars[1].done?cars[1].finishTime:cars[1].time).toFixed(2)+'s';
+    cars.forEach((c,i)=>{
+      document.getElementById('lap'+(i+1)).textContent=c.done?'FINISHED':`LAP ${c.lap} / ${LAPS}`;
+      document.getElementById('time'+(i+1)).textContent=(c.done?c.finishTime:c.time).toFixed(2)+'s';
+    });
   }
-  function loop(t){ const dt=Math.min(0.05,(t-last)/1000); last=t; if(running) step(dt); render(); requestAnimationFrame(loop); }
+  function loop(t){
+    const dt=Math.min(0.05,(t-last)/1000); last=t;
+    if(state==='countdown'){
+      countdown-=dt;
+      const n=Math.ceil(countdown);
+      if(n>0) cars.forEach(c=>setBig(c,String(n),''));
+      else { state='racing'; goTimer=0.8; cars.forEach(c=>setBig(c,'GO!','go')); }
+    } else if(state==='racing'){
+      step(dt);
+      if(goTimer>0){ goTimer-=dt; if(goTimer<=0) cars.forEach(c=>{ if(!c.done) setBig(c,'',''); }); }
+    }
+    render(); requestAnimationFrame(loop);
+  }
   const overlay=document.getElementById('overlay');
+  const carName=c=>c===cars[0]?'Red':'Blue';
   function endRace(){
-    running=false;
-    const name=winner===cars[0]?'Red':'Blue';
-    document.getElementById('otitle').textContent=`${name} wins!`;
-    document.getElementById('omsg').textContent=`Finished ${LAPS} laps in ${winner.finishTime.toFixed(2)} seconds.`;
+    state='finished';
+    const [first,second]=finished;
+    document.getElementById('otitle').textContent=`${carName(first)} wins!`;
+    document.getElementById('omsg').textContent=`${carName(first)} finished ${lapWord} in ${first.finishTime.toFixed(2)}s. ${carName(second)} took ${second.finishTime.toFixed(2)}s.`;
     document.getElementById('start').textContent='Race again';
+    document.querySelector('.wrap').classList.add('finished');
     overlay.hidden=false;
   }
-  document.getElementById('omsg').textContent=`First to finish ${LAPS} laps wins. Stay on the road: grass is slow.`;
-  document.getElementById('start').addEventListener('click',()=>{ reset(); winner=null; overlay.hidden=true; running=true; });
+  const lapWord=`${LAPS} lap${LAPS===1?'':'s'}`;
+  document.getElementById('omsg').textContent=`First to finish ${lapWord} wins. Stay on the road: grass is slow.`;
+  document.getElementById('start').addEventListener('click',()=>{
+    reset(); finished=[]; cars.forEach(c=>setBig(c,'',''));
+    document.querySelector('.wrap').classList.remove('finished');
+    overlay.hidden=true; state='countdown'; countdown=3;
+  });
   reset();
   requestAnimationFrame(t=>{last=t;loop(t);});
 
   // Handy for poking at the game from the browser console
-  window.ACCEL={TRACK,samples,cars,keys,nearest,lapLength};
+  window.ACCEL={TRACK,samples,cars,keys,nearest,lapLength,get state(){return state;}};
 })();
 </script>
 </body>
