@@ -37,6 +37,8 @@
   .pane.left{left:0} .pane.right{right:0}
   .pane .hud{position:absolute;top:10px;left:50%;transform:translateX(-50%);font-family:var(--display);font-size:clamp(13px,2.2vw,20px);letter-spacing:.04em;color:#fff;text-shadow:0 2px 6px rgba(0,0,0,.6);background:rgba(16,20,24,.45);padding:4px 12px;border-radius:999px;white-space:nowrap}
   .pane .big{font-family:var(--display);font-size:clamp(28px,7vw,72px);color:#fff;text-shadow:0 4px 16px rgba(0,0,0,.6);text-align:center;line-height:1;padding:0 8px}
+  .pane .warn{position:absolute;top:46px;left:50%;transform:translateX(-50%);font-family:var(--display);font-size:clamp(11px,1.6vw,15px);letter-spacing:.04em;color:#fff;background:#d63b2f;padding:3px 10px;border-radius:999px;white-space:nowrap}
+  .pane .warn:empty{display:none}
   .pane .big.go{color:#7cfc7c}
   .pane .big.first{color:#ffd54a}
   .pane .big.second{color:#cfd8e3}
@@ -63,8 +65,8 @@
     <p id="omsg">First to finish 3 laps wins. Stay on the road: grass is slow.</p>
     <button id="start">Start race</button>
   </div>
-  <div class="pane left" id="pane1"><div class="hud" id="lap1">LAP 1 / 3</div><div class="big" id="big1"></div></div>
-  <div class="pane right" id="pane2"><div class="hud" id="lap2">LAP 1 / 3</div><div class="big" id="big2"></div></div>
+  <div class="pane left" id="pane1"><div class="hud" id="lap1">LAP 1 / 3</div><div class="warn" id="warn1"></div><div class="big" id="big1"></div></div>
+  <div class="pane right" id="pane2"><div class="hud" id="lap2">LAP 1 / 3</div><div class="warn" id="warn2"></div><div class="big" id="big2"></div></div>
 </div>
 <p class="hint">Click the track first so it hears your keys. Each player gets their own camera. Press M for the overhead map.</p>
 
@@ -98,7 +100,23 @@
   // Size of the drawing page in world units (portrait page, 3:4).
   const PAGE_W=240, PAGE_H=320;
 
-  const TRACK=TRACK1, CPS=4;
+  // ===================== DRIVING FEEL =====================
+  // These numbers decide how the cars drive. Change one, save, reload, drive.
+  const DRIVE={
+    TOP_SPEED:70,   // fastest a car can go on the road, in units per second (a car is 4 long)
+    ACCEL:60,       // how quickly it gets up to speed. Bigger = faster launch
+    BRAKE:60,       // how hard the brake/reverse key pulls
+    TURN:2.8,       // how sharply it steers. Bigger = tighter turns
+    GRIP:0.92,      // 1 = on rails, 0 = ice. The share of sideways sliding that dies out each second
+    DRAG:0.75,       // the share of your speed you still have after coasting for one second
+    OFFROAD:0.5,    // top speed multiplier on the grass (0.5 = half of normal)
+    GRASS_DRAG:0.35,// like DRAG, but on the grass. Lower = the grass grabs the car harder
+    BOUNCE:1.5,     // how hard cars ricochet off each other. 1 = perfect bounce, 0 = a dull thud
+    SPIN:0.1,       // how much a bump to the back half of a car makes it swerve. 0 = never swerves
+  };
+
+  // CPS = checkpoints per lap. You must pass them all, in order, on the road, or the lap doesn't count
+  const TRACK=TRACK1, CPS=16;
   // Laps to win: the track's setting, unless the address ends in ?laps=5 (handy for quick races)
   const LAPS=parseInt(new URLSearchParams(location.search).get('laps'))||TRACK.laps;
 
@@ -211,7 +229,8 @@
     scene.add(g); return g;
   }
   function makeCar(color,side,keys){
-    return {mesh:buildCar(color),keys,side,a:0,v:0,lap:1,cp:0,time:0,done:false,finishTime:0,
+    // a = which way the car points. vx,vz = which way it is actually moving (not always the same when sliding!)
+    return {mesh:buildCar(color),keys,side,a:0,vx:0,vz:0,speed:0,lap:1,cp:0,time:0,done:false,finishTime:0,
       cam:new THREE.PerspectiveCamera(60,1,0.5,500)};
   }
   const cars=[
@@ -234,7 +253,8 @@
       c.mesh.position.copy(s.p).addScaledVector(s.t,-4).addScaledVector(s.n,c.side*TRACK.width/4);
       c.mesh.position.y=0;
       c.a=Math.atan2(s.t.z,s.t.x);
-      c.v=0; c.lap=1; c.cp=0; c.time=0; c.done=false; c.finishTime=0;
+      // Cars start just behind the line, in the last checkpoint. Crossing the line makes it lap 1.
+      c.vx=0; c.vz=0; c.speed=0; c.spin=0; c.lap=0; c.cp=CPS-1; c.warn=''; c.time=0; c.done=false; c.finishTime=0;
       c.mesh.rotation.y=-c.a+Math.PI/2;
       updateCam(c,true);
     }
@@ -258,26 +278,59 @@
       c.time+=dt;
       const p=c.mesh.position, k=c.keys;
       const near=nearest(p.x,p.z), road=near.d<=onRoadDist;
-      const maxV=road?42:16, accel=road?34:16;
-      if(keys[k.up]) c.v+=accel*dt;
-      if(keys[k.down]) c.v-=accel*0.8*dt;
-      c.v*=road?0.99:0.95;
-      c.v=Math.max(-maxV/2,Math.min(maxV,c.v));
-      const turn=2.4*Math.min(1,Math.abs(c.v)/15)*(c.v<0?-1:1);
+      const mult=road?1:DRIVE.OFFROAD;             // grass shrinks top speed and acceleration
+      // Directions: fwd is where the car points, side is 90 degrees to its right
+      const fwd={x:Math.cos(c.a),z:Math.sin(c.a)}, side={x:-fwd.z,z:fwd.x};
+      // Split the real motion into "forward speed" and "sideways slide"
+      let vf=c.vx*fwd.x+c.vz*fwd.z, vs=c.vx*side.x+c.vz*side.z;
+      // Gas and brake push along the way the car points. Gas can't push past the cap
+      const cap=DRIVE.TOP_SPEED*mult;
+      if(keys[k.up]&&vf<cap) vf=Math.min(cap,vf+DRIVE.ACCEL*mult*dt);
+      if(keys[k.down]) vf-=DRIVE.BRAKE*dt;
+      // Drag slowly eats forward speed; grip eats the sideways slide (this is the slippery part)
+      vf*=Math.pow(road?DRIVE.DRAG:DRIVE.GRASS_DRAG,dt);
+      vs*=Math.pow(1-DRIVE.GRIP,dt);
+      // Over the cap (just hit the grass)? Ease down to it instead of snapping, so it feels like sinking, not a wall
+      if(vf>cap) vf+=(cap-vf)*Math.min(1,6*dt);
+      if(vf<-cap*0.4) vf=-cap*0.4;
+      // Steering: you can only turn when moving, and it flips when reversing
+      const turn=DRIVE.TURN*Math.min(1,Math.abs(vf)/15)*(vf<0?-1:1);
       if(keys[k.left]) c.a-=turn*dt;
       if(keys[k.right]) c.a+=turn*dt;
-      p.x+=Math.cos(c.a)*c.v*dt; p.z+=Math.sin(c.a)*c.v*dt;
+      // Spin from a rear bump swings the nose on its own, then fades out (90% gone after a second)
+      c.a+=c.spin*dt; c.spin*=Math.pow(0.1,dt);
+      // Put forward and sideways back together and move
+      c.vx=fwd.x*vf+side.x*vs; c.vz=fwd.z*vf+side.z*vs; c.speed=vf;
+      p.x+=c.vx*dt; p.z+=c.vz*dt;
       p.x=Math.max(-440,Math.min(440,p.x)); p.z=Math.max(-440,Math.min(440,p.z));
       c.mesh.rotation.y=-c.a+Math.PI/2;
-      // Lap counting: the lap is split into CPS sectors that must be passed in order.
-      const s=Math.floor(near.i*CPS/N);
-      if(s===(c.cp+1)%CPS){ c.cp=s; if(s===0){ c.lap++; if(c.lap>LAPS){ c.done=true; c.finishTime=c.time; c.lap=LAPS; carFinished(c); } } }
+      // Lap counting: the lap is split into CPS checkpoints that must be passed in order,
+      // and a checkpoint only counts if you're on the road or just beside it (no cutting across the grass).
+      const s=Math.floor(near.i*CPS/N), ahead=(s-c.cp+CPS)%CPS;   // how many checkpoints past the last one you earned
+      if(ahead===1&&near.d<=TRACK.width){ c.cp=s; if(s===0){ c.lap++; if(c.lap>LAPS){ c.done=true; c.finishTime=c.time; c.lap=LAPS; carFinished(c); } } }
+      c.warn=ahead<=1?'':ahead<=CPS/2?'GO BACK TO THE TRACK':'WRONG WAY';
       updateCam(c,false);
     }
-    // simple car-vs-car bump
-    const a=cars[0].mesh.position, b=cars[1].mesh.position;
+    // Car-vs-car ricochet: like two billiard balls of the same weight
+    const [A,B]=cars, a=A.mesh.position, b=B.mesh.position;
     const dx=b.x-a.x, dz=b.z-a.z, d=Math.hypot(dx,dz);
-    if(d<3.2&&d>0){ const push=(3.2-d)/2; a.x-=dx/d*push; a.z-=dz/d*push; b.x+=dx/d*push; b.z+=dz/d*push; }
+    if(d<3.2&&d>0){
+      const nx=dx/d, nz=dz/d;                              // line from A to B
+      const push=(3.2-d)/2;                                // un-overlap them
+      a.x-=nx*push; a.z-=nz*push; b.x+=nx*push; b.z+=nz*push;
+      const closing=(B.vx-A.vx)*nx+(B.vz-A.vz)*nz;         // negative = moving into each other
+      if(closing<0){
+        const j=-(1+DRIVE.BOUNCE)*closing/2;               // the kick each car gets
+        A.vx-=j*nx; A.vz-=j*nz; B.vx+=j*nx; B.vz+=j*nz;
+        // Hit in the back half? That car swerves (like a PIT maneuver). The further off-center, the bigger the swerve.
+        for(const [victim,hitter] of [[A,B],[B,A]]){
+          const f={x:Math.cos(victim.a),z:Math.sin(victim.a)}, s={x:-f.z,z:f.x};
+          const rx=hitter.mesh.position.x-victim.mesh.position.x, rz=hitter.mesh.position.z-victim.mesh.position.z;
+          const behind=rx*f.x+rz*f.z<0, toRight=(rx*s.x+rz*s.z)/3.2;   // -1..1, which side the hitter is on
+          if(behind) victim.spin+=DRIVE.SPIN*-closing*toRight;
+        }
+      }
+    }
   }
   function updateCam(c,snap){
     const p=c.mesh.position;
@@ -313,7 +366,8 @@
       });
     }
     cars.forEach((c,i)=>{
-      document.getElementById('lap'+(i+1)).textContent=c.done?'FINISHED':`LAP ${c.lap} / ${LAPS}`;
+      document.getElementById('lap'+(i+1)).textContent=c.done?'FINISHED':`LAP ${Math.max(1,c.lap)} / ${LAPS}`;
+      document.getElementById('warn'+(i+1)).textContent=c.done?'':c.warn;
       document.getElementById('time'+(i+1)).textContent=(c.done?c.finishTime:c.time).toFixed(2)+'s';
     });
   }
@@ -352,7 +406,8 @@
   requestAnimationFrame(t=>{last=t;loop(t);});
 
   // Handy for poking at the game from the browser console
-  window.ACCEL={TRACK,samples,cars,keys,nearest,lapLength,get state(){return state;}};
+  // e.g. ACCEL.DRIVE.GRIP=0.7 in the console changes the feel instantly, no reload
+  window.ACCEL={TRACK,DRIVE,samples,cars,keys,nearest,lapLength,get state(){return state;}};
 })();
 </script>
 </body>
