@@ -1,0 +1,7 @@
+# Editor scratch files
+*.swp
+*.swo
+*~
+
+# Mac Finder junk
+.DS_Store
