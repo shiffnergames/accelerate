@@ -105,7 +105,13 @@
       {type:'boost', at:[0.15,0.75], length:14, width:6, side:0},    // speed pad on the left straight, just before the start line
       {type:'boost', at:[0.89,0.47], length:14, width:6, side:0},    // speed pad on the right straight, after the corner
       {type:'mud',   at:[0.59,0.70], length:28, width:10, side:1},   // mud on the inner leg, right side, 4 units of clean road on the left
-      {type:'mud',   at:[0.60,0.07], length:32, width:10, side:-1},  // mud on the top straight, outer edge, 4 units clean on the inside
+      {type:'mud',   at:[0.62,0.07], length:32, width:10, side:-1},  // mud on the top straight just past the jump, outer edge, 4 units clean on the inside
+    ],
+    // Ramps: wedges you drive up and fly off. Placed like zones (`at`, `length`, `width`, `side`).
+    // `height` is how tall the lip is. A longer, lower ramp is a gentle hop; short and tall is a big launch.
+    // How far you fly depends on your speed: hit this one flat out and you clear the mud.
+    ramps:[
+      {at:[0.51,0.07], length:12, width:8, height:3, side:0},   // jump on the straightest bit of the top straight, right before the mud. 3 units of road on each side to skip it
     ]
   };
   // Size of the drawing page in world units (portrait page, 3:4).
@@ -134,7 +140,13 @@
   //   time  = how many seconds the effect keeps going after you leave the patch
   const ZONE_TYPES={
     boost:{color:0xffb300, speed:1.6, kick:80, drag:0.95, time:0.8},  // speed pad: a shove, then a higher top speed for a bit
-    mud:  {color:0x5b3a1e, speed:0.4, kick:0,  drag:0.6,  time:0},    // mud: slows you to 60% and grabs the tires
+    mud:  {color:0x5b3a1e, speed:0.4, kick:0,  drag:0.6,  time:0},    // mud: slows you to 40% and grabs the tires
+  };
+
+  // ===================== JUMPS =====================
+  const JUMP={
+    GRAVITY:53,     // how hard the ground pulls a flying car back down. Lower = floatier, longer jumps (40 flies so far you land in the corner)
+    AIR_TURN:0.5,   // how much steering works in the air (1 = same as on the road, 0 = none at all)
   };
 
   // CPS = checkpoints per lap. You must pass them all, in order, on the road, or the lap doesn't count
@@ -232,6 +244,52 @@
     return Math.abs(off-z.center)<=z.width/2?z:null;
   }
 
+  // Ramps: a wedge that rises from the road to `height` at the lip, then drops straight off.
+  // rampAt[i] = the ramp at sample i (or null). groundY() tells a car how high the ground is under it.
+  const rampAt=new Array(N).fill(null);
+  function wedge(start,count,width,height,color,center=0){
+    const v=[], tri=(a,b,c)=>v.push(...a,...b,...c);      // three corners per triangle, no sharing, so every face is flat
+    const hw=width/2, L=[],R=[],Lb=[],Rb=[];              // top-left, top-right, bottom-left, bottom-right corners per row
+    for(let r=0;r<=count;r++){
+      const s=samples[(start+r)%N], y=0.02+height*r/count;
+      const l=s.p.clone().addScaledVector(s.n,center+hw), rt=s.p.clone().addScaledVector(s.n,center-hw);
+      L.push([l.x,y,l.z]); R.push([rt.x,y,rt.z]); Lb.push([l.x,0,l.z]); Rb.push([rt.x,0,rt.z]);
+    }
+    for(let r=0;r<count;r++){
+      tri(L[r],L[r+1],R[r]); tri(R[r],L[r+1],R[r+1]);      // the slope you drive up
+      tri(Lb[r],L[r],L[r+1]); tri(Lb[r],L[r+1],Lb[r+1]);   // left wall
+      tri(Rb[r],R[r+1],R[r]); tri(Rb[r],Rb[r+1],R[r+1]);   // right wall
+    }
+    tri(L[count],Lb[count],R[count]); tri(R[count],Lb[count],Rb[count]);   // the tall back face at the lip
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(v),3)); g.computeVertexNormals();
+    const m=new THREE.Mesh(g,new THREE.MeshLambertMaterial({color,side:THREE.DoubleSide}));
+    m.castShadow=true; m.receiveShadow=true; scene.add(m); return m;
+  }
+  for(const r of TRACK.ramps||[]){
+    const width=Math.min(r.width??TRACK.width,TRACK.width), side=r.side??0, center=side*(TRACK.width-width)/2;
+    const mid=nearest((r.at[0]-0.5)*PAGE_W,(r.at[1]-0.5)*PAGE_H).i, half=Math.round(r.length/2/spacing);
+    const ramp={start:(mid-half+N)%N,count:half*2,height:r.height,width,center};
+    for(let j=0;j<=ramp.count+1;j++) rampAt[(ramp.start+j)%N]=ramp;   // one extra so the lip itself is measured, not guessed
+    wedge(ramp.start,ramp.count,width,r.height,0x6d7480,center);
+    // yellow stripes on the slope so you can see it coming
+    const stripe=new THREE.PlaneGeometry(width-1,0.6); stripe.rotateX(-Math.PI/2);
+    for(let j=1;j<ramp.count;j+=2){
+      const s=samples[(ramp.start+j)%N], mk=new THREE.Mesh(stripe,new THREE.MeshLambertMaterial({color:0xffd23c}));
+      mk.position.copy(s.p).addScaledVector(s.n,center); mk.position.y=0.05+r.height*j/ramp.count;
+      mk.rotation.order='YXZ'; mk.rotation.y=-Math.atan2(s.t.z,s.t.x)-Math.PI/2; mk.rotation.x=Math.atan(r.height/(ramp.count*spacing)); scene.add(mk);
+    }
+  }
+  // How high is the ground under this spot? 0 everywhere except on a ramp, where it rises toward the lip.
+  function groundY(p,near){
+    const r=rampAt[near.i]; if(!r) return 0;
+    const s=samples[near.i];
+    const off=(p.x-s.p.x)*s.n.x+(p.z-s.p.z)*s.n.z; if(Math.abs(off-r.center)>r.width/2) return 0;   // beside the ramp, not on it
+    const along=(p.x-s.p.x)*s.t.x+(p.z-s.p.z)*s.t.z;
+    const frac=(((near.i-r.start+N)%N)*spacing+along)/(r.count*spacing);                            // 0 at the foot, 1 at the lip
+    return frac<0||frac>1.001?0:r.height*Math.min(1,frac);                                            // past the lip there's nothing under you
+  }
+
   // Curbs: red/white blocks along both edges (instanced so it's one draw call per color)
   { const geo=new THREE.BoxGeometry(2.4,0.3,0.9), hw=TRACK.width/2+0.5;
     const red=new THREE.InstancedMesh(geo,new THREE.MeshLambertMaterial({color:0xd63b2f}),N);
@@ -281,6 +339,7 @@
   // ===================== CARS =====================
   function buildCar(color){
     const g=new THREE.Group();
+    g.rotation.order='YXZ';   // turn first (y), then tip the nose up or down (x) for ramps and jumps
     const body=new THREE.Mesh(new THREE.BoxGeometry(2,0.8,4),new THREE.MeshLambertMaterial({color}));
     body.position.y=0.7; body.castShadow=true; g.add(body);
     const cabin=new THREE.Mesh(new THREE.BoxGeometry(1.6,0.7,1.8),new THREE.MeshLambertMaterial({color:0xdff6ff}));
@@ -294,7 +353,8 @@
   }
   function makeCar(color,side,keys){
     // a = which way the car points. vx,vz = which way it is actually moving (not always the same when sliding!)
-    return {mesh:buildCar(color),keys,side,a:0,vx:0,vz:0,speed:0,lap:1,cp:0,time:0,done:false,finishTime:0,
+    // vy = up/down speed, air = true while the car is off the ground
+    return {mesh:buildCar(color),keys,side,a:0,vx:0,vz:0,vy:0,air:false,speed:0,lap:1,cp:0,time:0,done:false,finishTime:0,
       cam:new THREE.PerspectiveCamera(60,1,0.5,500)};
   }
   const cars=[
@@ -319,8 +379,8 @@
       c.a=Math.atan2(s.t.z,s.t.x);
       // Cars start just behind the line, in the last checkpoint. Crossing the line makes it lap 1.
       c.vx=0; c.vz=0; c.speed=0; c.spin=0; c.lap=0; c.cp=CPS-1; c.warn=''; c.time=0; c.done=false; c.finishTime=0;
-      c.zone=null; c.effect=null; c.effectTime=0; c.kick=0;
-      c.mesh.rotation.y=-c.a+Math.PI/2;
+      c.zone=null; c.effect=null; c.effectTime=0; c.kick=0; c.vy=0; c.air=false;
+      c.mesh.rotation.y=-c.a+Math.PI/2; c.mesh.rotation.x=0;
       updateCam(c,true);
     }
   }
@@ -345,30 +405,34 @@
       const near=nearest(p.x,p.z), road=near.d<=onRoadDist;
       // Zones: driving onto a zone starts its effect (and its kick). The effect keeps going for
       // `time` seconds after you leave the patch, which is how a speed pad boost outlasts the pad.
-      const zone=road?zoneUnder(c,near):null;
+      // (A flying car is over the zone, not on it, so mud can't grab you mid-air.)
+      const zone=road&&!c.air?zoneUnder(c,near):null;
       if(zone){ if(zone!==c.zone) c.kick=zone.kick; c.effect=zone; c.effectTime=zone.time; }
       else if(c.effectTime>0){ c.effectTime-=dt; if(c.effectTime<=0) c.effect=null; }
       else c.effect=null;
       c.zone=zone;
       let mult=road?1:DRIVE.OFFROAD, drag=road?DRIVE.DRAG:DRIVE.GRASS_DRAG;   // grass shrinks top speed and grabs the car
       if(c.effect){ mult*=c.effect.speed; drag=c.effect.drag; }
+      if(c.air){ mult=1; drag=1; }   // nothing to push against in the air: no grass, no mud, no slowing down
       // Directions: fwd is where the car points, side is 90 degrees to its right
       const fwd={x:Math.cos(c.a),z:Math.sin(c.a)}, side={x:-fwd.z,z:fwd.x};
       // Split the real motion into "forward speed" and "sideways slide"
       let vf=c.vx*fwd.x+c.vz*fwd.z, vs=c.vx*side.x+c.vz*side.z;
       if(c.kick){ vf+=c.kick; c.kick=0; }         // the one-time shove from a speed pad
-      // Gas and brake push along the way the car points. Gas can't push past the cap
+      // Gas and brake push along the way the car points. Gas can't push past the cap (and the wheels are spinning in the air)
       const cap=DRIVE.TOP_SPEED*mult;
-      if(keys[k.up]&&vf<cap) vf=Math.min(cap,vf+DRIVE.ACCEL*mult*dt);
-      if(keys[k.down]) vf-=DRIVE.BRAKE*dt;
+      if(!c.air){
+        if(keys[k.up]&&vf<cap) vf=Math.min(cap,vf+DRIVE.ACCEL*mult*dt);
+        if(keys[k.down]) vf-=DRIVE.BRAKE*dt;
+      }
       // Drag slowly eats forward speed; grip eats the sideways slide (this is the slippery part)
       vf*=Math.pow(drag,dt);
       vs*=Math.pow(1-DRIVE.GRIP,dt);
       // Over the cap (just hit the grass)? Ease down to it instead of snapping, so it feels like sinking, not a wall
-      if(vf>cap) vf+=(cap-vf)*Math.min(1,6*dt);
+      if(vf>cap&&!c.air) vf+=(cap-vf)*Math.min(1,6*dt);
       if(vf<-cap*0.4) vf=-cap*0.4;
-      // Steering: you can only turn when moving, and it flips when reversing
-      const turn=DRIVE.TURN*Math.min(1,Math.abs(vf)/15)*(vf<0?-1:1);
+      // Steering: you can only turn when moving, it flips when reversing, and it barely works in the air
+      const turn=DRIVE.TURN*Math.min(1,Math.abs(vf)/15)*(vf<0?-1:1)*(c.air?JUMP.AIR_TURN:1);
       if(keys[k.left]) c.a-=turn*dt;
       if(keys[k.right]) c.a+=turn*dt;
       // Spin from a rear bump swings the nose on its own, then fades out (90% gone after a second)
@@ -377,18 +441,33 @@
       c.vx=fwd.x*vf+side.x*vs; c.vz=fwd.z*vf+side.z*vs; c.speed=vf;
       p.x+=c.vx*dt; p.z+=c.vz*dt;
       p.x=Math.max(-440,Math.min(440,p.x)); p.z=Math.max(-440,Math.min(440,p.z));
+      // Up and down. On the ground the car follows the ground (a ramp lifts it). When the ground
+      // drops away under it (the lip of a ramp) it keeps the upward speed the ramp gave it and flies
+      // until gravity brings it back down to whatever is underneath.
+      const now=nearest(p.x,p.z), g=groundY(p,now);
+      if(!c.air){
+        if(g<p.y-0.05) c.air=true;                         // off the lip!
+        else { c.vy=Math.min(30,(g-p.y)/dt); p.y=g; }      // ride the ground, remember how fast it's lifting us
+      }
+      if(c.air){
+        c.vy-=JUMP.GRAVITY*dt; p.y+=c.vy*dt;
+        if(p.y<=g){ p.y=g; c.vy=0; c.air=false; }          // touchdown
+      }
       c.mesh.rotation.y=-c.a+Math.PI/2;
+      // Tip the nose to match: up going up, down coming down (eased so landings don't snap)
+      const pitch=-Math.atan2(c.vy,Math.max(5,Math.abs(vf)));
+      c.mesh.rotation.x+=(pitch-c.mesh.rotation.x)*Math.min(1,12*dt);
       // Lap counting: the lap is split into CPS checkpoints that must be passed in order,
       // and a checkpoint only counts if you're on the road or just beside it (no cutting across the grass).
-      const s=Math.floor(near.i*CPS/N), ahead=(s-c.cp+CPS)%CPS;   // how many checkpoints past the last one you earned
-      if(ahead===1&&near.d<=TRACK.width){ c.cp=s; if(s===0){ c.lap++; if(c.lap>LAPS){ c.done=true; c.finishTime=c.time; c.lap=LAPS; carFinished(c); } } }
+      const s=Math.floor(now.i*CPS/N), ahead=(s-c.cp+CPS)%CPS;   // how many checkpoints past the last one you earned
+      if(ahead===1&&now.d<=TRACK.width){ c.cp=s; if(s===0){ c.lap++; if(c.lap>LAPS){ c.done=true; c.finishTime=c.time; c.lap=LAPS; carFinished(c); } } }
       c.warn=ahead<=1?'':ahead<=CPS/2?'GO BACK TO THE TRACK':'WRONG WAY';
-      updateCam(c,false);
+      updateCam(c,false,dt);
     }
     // Car-vs-car ricochet: like two billiard balls of the same weight
     const [A,B]=cars, a=A.mesh.position, b=B.mesh.position;
     const dx=b.x-a.x, dz=b.z-a.z, d=Math.hypot(dx,dz);
-    if(d<3.2&&d>0){
+    if(d<3.2&&d>0&&Math.abs(a.y-b.y)<1.5){   // (a car flying overhead doesn't hit the one below)
       const nx=dx/d, nz=dz/d;                              // line from A to B
       const push=(3.2-d)/2;                                // un-overlap them
       a.x-=nx*push; a.z-=nz*push; b.x+=nx*push; b.z+=nz*push;
@@ -406,11 +485,13 @@
       }
     }
   }
-  function updateCam(c,snap){
+  function updateCam(c,snap,dt){
     const p=c.mesh.position;
-    const target=new THREE.Vector3(p.x-Math.cos(c.a)*12,7,p.z-Math.sin(c.a)*12);
-    if(snap) c.cam.position.copy(target); else c.cam.position.lerp(target,0.12);
-    c.cam.lookAt(p.x+Math.cos(c.a)*6,1.5,p.z+Math.sin(c.a)*6);
+    // The camera sits behind and above the car and rises with it, so a jump lifts the whole view
+    const target=new THREE.Vector3(p.x-Math.cos(c.a)*12,p.y+7,p.z-Math.sin(c.a)*12);
+    // Glide toward the target spot (same smoothness whatever the frame rate: about 88% of the gap closes each 1/60 s)
+    if(snap) c.cam.position.copy(target); else c.cam.position.lerp(target,1-Math.pow(0.0005,dt));
+    c.cam.lookAt(p.x+Math.cos(c.a)*6,p.y+1.5,p.z+Math.sin(c.a)*6);
   }
 
   // Overhead map camera (press M): looks straight down with the page's top at the top of the screen
@@ -481,7 +562,7 @@
 
   // Handy for poking at the game from the browser console
   // e.g. ACCEL.DRIVE.GRIP=0.7 in the console changes the feel instantly, no reload
-  window.ACCEL={TRACK,DRIVE,ZONE_TYPES,zoneAt,samples,cars,keys,nearest,lapLength,get state(){return state;}};
+  window.ACCEL={TRACK,DRIVE,ZONE_TYPES,JUMP,zoneAt,rampAt,groundY,samples,cars,keys,nearest,lapLength,get state(){return state;}};
 })();
 </script>
 </body>
