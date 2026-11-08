@@ -104,7 +104,7 @@
     zones:[
       {type:'boost', at:[0.15,0.75], length:14, width:6, side:0},    // speed pad on the left straight, just before the start line
       {type:'boost', at:[0.89,0.47], length:14, width:6, side:0},    // speed pad on the right straight, after the corner
-      {type:'mud',   at:[0.59,0.70], length:28, width:10, side:1},   // mud on the inner leg, right side, 4 units of clean road on the left
+      {type:'mud',   at:[0.33,0.82], length:28, width:10, side:1},   // mud on the way down from the half-pipe turn, right side, 4 units of clean road on the left
       {type:'mud',   at:[0.62,0.07], length:32, width:10, side:-1},  // mud on the top straight just past the jump, outer edge, 4 units clean on the inside
     ],
     // Ramps: wedges you drive up and fly off. Placed like zones (`at`, `length`, `width`, `side`).
@@ -112,6 +112,13 @@
     // How far you fly depends on your speed: hit this one flat out and you clear the mud.
     ramps:[
       {at:[0.51,0.07], length:12, width:8, height:3, side:0},   // jump on the straightest bit of the top straight, right before the mud. 3 units of road on each side to skip it
+    ],
+    // Walls: a curved bank along one edge of the road that you can ride up like a half pipe.
+    // `side` is which edge (-1 = left as you drive, 1 = right), `height` is how tall the rim is,
+    // `width` is how far out from the road edge the bank reaches (smaller = steeper). It fades in
+    // and out at the ends so you glide back onto the road. Steer into it to climb, away to come down.
+    walls:[
+      {at:[0.45,0.62], length:110, side:1, height:9, width:6},   // half-pipe on the outside of the big left-hand turn at the top of the inner loop (runs onto both legs so the ends are gentle)
     ]
   };
   // Size of the drawing page in world units (portrait page, 3:4).
@@ -147,6 +154,13 @@
   const JUMP={
     GRAVITY:53,     // how hard the ground pulls a flying car back down. Lower = floatier, longer jumps (40 flies so far you land in the corner)
     AIR_TURN:0.5,   // how much steering works in the air (1 = same as on the road, 0 = none at all)
+  };
+
+  // ===================== HALF PIPE =====================
+  const HALFPIPE={
+    PULL:0.5,       // how hard gravity pulls you back down the wall (1 = full gravity, 0 = you stick wherever you steer)
+    TAPER:25,       // units at each end of a wall where it fades between flat road and full height (short = a ski jump off the end!)
+    RIM_BOUNCE:0.8, // how hard the rim throws you back down the bank (0 = you can sit on the rim, 1 = full bounce)
   };
 
   // CPS = checkpoints per lap. You must pass them all, in order, on the road, or the lap doesn't count
@@ -280,15 +294,57 @@
       mk.rotation.order='YXZ'; mk.rotation.y=-Math.atan2(s.t.z,s.t.x)-Math.PI/2; mk.rotation.x=Math.atan(r.height/(ramp.count*spacing)); scene.add(mk);
     }
   }
-  // How high is the ground under this spot? 0 everywhere except on a ramp, where it rises toward the lip.
-  function groundY(p,near){
-    const r=rampAt[near.i]; if(!r) return 0;
-    const s=samples[near.i];
-    const off=(p.x-s.p.x)*s.n.x+(p.z-s.p.z)*s.n.z; if(Math.abs(off-r.center)>r.width/2) return 0;   // beside the ramp, not on it
-    const along=(p.x-s.p.x)*s.t.x+(p.z-s.p.z)*s.t.z;
-    const frac=(((near.i-r.start+N)%N)*spacing+along)/(r.count*spacing);                            // 0 at the foot, 1 at the lip
-    return frac<0||frac>1.001?0:r.height*Math.min(1,frac);                                            // past the lip there's nothing under you
+  // Walls (half pipes): a curved bank along one edge of the road. wallAt[i] = the wall at sample i, or null.
+  // Across the road, u = how far up the bank you are (0 at the foot, `width` at the rim) and the
+  // height is env * height * (u/width)^2: a bowl, gentle at the bottom and steep near the rim.
+  // env fades the wall in and out over TAPER units at each end (j = samples from the wall's start).
+  const wallAt=new Array(N).fill(null);
+  function wallEnv(w,j){ return Math.max(0,Math.min(1,Math.min(j,w.count-j)*spacing/HALFPIPE.TAPER)); }
+  for(const w of TRACK.walls||[]){
+    const mid=nearest((w.at[0]-0.5)*PAGE_W,(w.at[1]-0.5)*PAGE_H).i, half=Math.round(w.length/2/spacing);
+    const wall={start:(mid-half+N)%N,count:half*2,side:w.side??-1,height:w.height,width:w.width,edge:TRACK.width/2-1};
+    for(let j=0;j<=wall.count;j++) wallAt[(wall.start+j)%N]=wall;
+    // The bank: a grid, one row per sample along the road, K strips across, smooth-shaded
+    const K=8, pos=[], idx=[], rim=[], ridx=[], back=[], bidx=[];
+    for(let j=0;j<=wall.count;j++){
+      const s=samples[(wall.start+j)%N], env=wallEnv(wall,j);
+      const at=u=>{ const q=s.p.clone().addScaledVector(s.n,wall.side*(wall.edge+u)); return [q.x,0.03+env*wall.height*(u/wall.width)**2,q.z]; };
+      for(let k=0;k<=K;k++) pos.push(...at(wall.width*k/K));
+      if(j<wall.count) for(let k=0;k<K;k++){ const a=j*(K+1)+k, b=a+K+1; idx.push(a,b,a+1, a+1,b,b+1); }
+      rim.push(...at(wall.width-0.9),...at(wall.width));       // a dark band along the top so the rim reads from the chase camera
+      const top=at(wall.width); back.push(...top, top[0],0,top[2]);   // the flat back face, rim down to the grass
+      if(j<wall.count){ const a=j*2; ridx.push(a,a+2,a+1, a+1,a+2,a+3); bidx.push(a,a+2,a+1, a+1,a+2,a+3); }
+    }
+    for(const [v,ix,color,lift] of [[pos,idx,0x8a93a0,0],[rim,ridx,0x2b2f36,0.04],[back,bidx,0x5c636e,0]]){
+      const g=new THREE.BufferGeometry();
+      g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(v),3)); g.setIndex(ix); g.computeVertexNormals();
+      const m=new THREE.Mesh(g,new THREE.MeshLambertMaterial({color,side:THREE.DoubleSide}));
+      m.position.y=lift; m.receiveShadow=true; scene.add(m);
+    }
   }
+
+  // What's under this spot? null on plain ground. On a ramp or a wall: {y, slope, rim}.
+  //   y     = how high the ground is
+  //   slope = how fast the ground rises as you move right across the road (0 on a ramp, since it only rises along the road)
+  //   rim   = true when you've been pushed past the top of a wall (step() holds you at the rim)
+  function groundAt(p,near){
+    const s=samples[near.i], off=(p.x-s.p.x)*s.n.x+(p.z-s.p.z)*s.n.z, along=(p.x-s.p.x)*s.t.x+(p.z-s.p.z)*s.t.z;
+    const r=rampAt[near.i];
+    if(r&&Math.abs(off-r.center)<=r.width/2){
+      const frac=(((near.i-r.start+N)%N)*spacing+along)/(r.count*spacing);                         // 0 at the foot, 1 at the lip
+      if(frac>=0&&frac<=1.001) return {y:r.height*Math.min(1,frac),slope:0,rim:false};           // past the lip there's nothing under you
+    }
+    const w=wallAt[near.i];
+    if(w){
+      const u=w.side*off-w.edge;                                                                     // how far up the bank you are
+      if(u>0){
+        const env=wallEnv(w,((near.i-w.start+N)%N)+along/spacing), uu=Math.min(u,w.width);
+        return {y:env*w.height*(uu/w.width)**2, slope:w.side*env*2*w.height*uu/(w.width*w.width), rim:u>w.width, wall:w};
+      }
+    }
+    return null;
+  }
+  function groundY(p,near){ const g=groundAt(p,near); return g?g.y:0; }   // just the height
 
   // Curbs: red/white blocks along both edges (instanced so it's one draw call per color)
   { const geo=new THREE.BoxGeometry(2.4,0.3,0.9), hw=TRACK.width/2+0.5;
@@ -299,6 +355,7 @@
     samples.forEach((s,i)=>{
       q.setFromAxisAngle(up,-Math.atan2(s.t.z,s.t.x));
       for(const side of [1,-1]){
+        if(wallAt[i]&&wallAt[i].side===side) continue;   // the half-pipe wall starts here, no curb
         const p=s.p.clone().addScaledVector(s.n,side*hw); p.y=0.15;
         m.compose(p,q,sc);
         if((i+(side>0?0:1))%2) white.setMatrixAt(wi++,m); else red.setMatrixAt(ri++,m);
@@ -380,7 +437,7 @@
       // Cars start just behind the line, in the last checkpoint. Crossing the line makes it lap 1.
       c.vx=0; c.vz=0; c.speed=0; c.spin=0; c.lap=0; c.cp=CPS-1; c.warn=''; c.time=0; c.done=false; c.finishTime=0;
       c.zone=null; c.effect=null; c.effectTime=0; c.kick=0; c.vy=0; c.air=false;
-      c.mesh.rotation.y=-c.a+Math.PI/2; c.mesh.rotation.x=0;
+      c.mesh.rotation.y=-c.a+Math.PI/2; c.mesh.rotation.x=0; c.mesh.rotation.z=0;
       updateCam(c,true);
     }
   }
@@ -402,7 +459,8 @@
       if(c.done) continue;
       c.time+=dt;
       const p=c.mesh.position, k=c.keys;
-      const near=nearest(p.x,p.z), road=near.d<=onRoadDist;
+      // (Riding a ramp or the half-pipe wall counts as road, even though it's beside the flat part.)
+      const near=nearest(p.x,p.z), gnd=groundAt(p,near), road=near.d<=onRoadDist||!!gnd;
       // Zones: driving onto a zone starts its effect (and its kick). The effect keeps going for
       // `time` seconds after you leave the patch, which is how a speed pad boost outlasts the pad.
       // (A flying car is over the zone, not on it, so mud can't grab you mid-air.)
@@ -428,6 +486,12 @@
       // Drag slowly eats forward speed; grip eats the sideways slide (this is the slippery part)
       vf*=Math.pow(drag,dt);
       vs*=Math.pow(1-DRIVE.GRIP,dt);
+      // On a bank (the half pipe) gravity pulls you down the slope: back toward the road if you're
+      // riding along it, and it slows you if you charge straight up it
+      if(gnd&&gnd.slope&&!c.air){
+        const pull=JUMP.GRAVITY*HALFPIPE.PULL*gnd.slope, n=samples[near.i].n;
+        vf-=pull*(n.x*fwd.x+n.z*fwd.z)*dt; vs-=pull*(n.x*side.x+n.z*side.z)*dt;
+      }
       // Over the cap (just hit the grass)? Ease down to it instead of snapping, so it feels like sinking, not a wall
       if(vf>cap&&!c.air) vf+=(cap-vf)*Math.min(1,6*dt);
       if(vf<-cap*0.4) vf=-cap*0.4;
@@ -439,14 +503,34 @@
       c.a+=c.spin*dt; c.spin*=Math.pow(0.1,dt);
       // Put forward and sideways back together and move
       c.vx=fwd.x*vf+side.x*vs; c.vz=fwd.z*vf+side.z*vs; c.speed=vf;
+      const px0=p.x, pz0=p.z;
       p.x+=c.vx*dt; p.z+=c.vz*dt;
       p.x=Math.max(-440,Math.min(440,p.x)); p.z=Math.max(-440,Math.min(440,p.z));
       // Up and down. On the ground the car follows the ground (a ramp lifts it). When the ground
       // drops away under it (the lip of a ramp) it keeps the upward speed the ramp gave it and flies
       // until gravity brings it back down to whatever is underneath.
-      const now=nearest(p.x,p.z), g=groundY(p,now);
+      let now=nearest(p.x,p.z), under=groundAt(p,now);
+      if(under&&under.rim){   // at the top of the half pipe: the rim holds you, no going over the back
+        const s2=samples[now.i], w=under.wall, off2=(p.x-s2.p.x)*s2.n.x+(p.z-s2.p.z)*s2.n.z, want=w.side*(w.edge+w.width);
+        p.x+=(want-off2)*s2.n.x; p.z+=(want-off2)*s2.n.z;
+        // The rim bounces you back down the bank (so you only stay up there if you arrive with no sideways push),
+        // and the climb speed is kept, so hitting it fast pops you straight up too
+        const out=(c.vx*s2.n.x+c.vz*s2.n.z)*w.side; if(out>0){ c.vx-=(1+HALFPIPE.RIM_BOUNCE)*out*w.side*s2.n.x; c.vz-=(1+HALFPIPE.RIM_BOUNCE)*out*w.side*s2.n.z; }
+        under=groundAt(p,now);
+      }
+      // Drove into the side of something (the back of the half pipe, the side of a ramp)? The ground can't
+      // jump up under a car by more than a kerb's worth in one frame, so stay put and lose the sideways push.
+      if(under&&under.y>p.y+1+30*dt){
+        p.x=px0; p.z=pz0; now=nearest(p.x,p.z);
+        const n=samples[now.i].n, into=c.vx*n.x+c.vz*n.z; c.vx-=into*n.x; c.vz-=into*n.z;
+        under=groundAt(p,now);
+      }
+      const g=under?under.y:0;
       if(!c.air){
-        if(g<p.y-0.05) c.air=true;                         // off the lip!
+        // You only leave the ground if it drops away faster than you'd fall anyway this frame (a ramp's lip does,
+        // sliding down the half-pipe's curved bank doesn't). The 0.3 is slack so the bank feels sticky.
+        const fall=p.y+c.vy*dt-0.5*JUMP.GRAVITY*dt*dt;
+        if(g<fall-0.3) c.air=true;                         // off the lip!
         else { c.vy=Math.min(30,(g-p.y)/dt); p.y=g; }      // ride the ground, remember how fast it's lifting us
       }
       if(c.air){
@@ -457,6 +541,9 @@
       // Tip the nose to match: up going up, down coming down (eased so landings don't snap)
       const pitch=-Math.atan2(c.vy,Math.max(5,Math.abs(vf)));
       c.mesh.rotation.x+=(pitch-c.mesh.rotation.x)*Math.min(1,12*dt);
+      // Lean sideways to match a banked wall: the side of the car that's higher up the bank lifts
+      const nn=samples[now.i].n, roll=under&&!c.air?-Math.atan(under.slope*(nn.x*side.x+nn.z*side.z)):0;
+      c.mesh.rotation.z+=(roll-c.mesh.rotation.z)*Math.min(1,12*dt);
       // Lap counting: the lap is split into CPS checkpoints that must be passed in order,
       // and a checkpoint only counts if you're on the road or just beside it (no cutting across the grass).
       const s=Math.floor(now.i*CPS/N), ahead=(s-c.cp+CPS)%CPS;   // how many checkpoints past the last one you earned
@@ -562,7 +649,7 @@
 
   // Handy for poking at the game from the browser console
   // e.g. ACCEL.DRIVE.GRIP=0.7 in the console changes the feel instantly, no reload
-  window.ACCEL={TRACK,DRIVE,ZONE_TYPES,JUMP,zoneAt,rampAt,groundY,samples,cars,keys,nearest,lapLength,get state(){return state;}};
+  window.ACCEL={TRACK,DRIVE,ZONE_TYPES,JUMP,HALFPIPE,zoneAt,rampAt,wallAt,groundAt,groundY,samples,cars,keys,nearest,lapLength,get state(){return state;}};
 })();
 </script>
 </body>
