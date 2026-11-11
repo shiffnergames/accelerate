@@ -5,3 +5,6 @@
 
 # Mac Finder junk
 .DS_Store
+
+# Built by tools/make_offline.py, rebuild it instead of committing it
+accelerate-offline.html
