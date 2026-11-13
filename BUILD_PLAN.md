@@ -81,6 +81,40 @@ This is the hardest feature on the page. It is fine if it comes last or does not
 ### Step 9: Scenery and polish
 Ask for the buildings, rocks, and dumpster from the drawing. Then: a title screen with the game's name, engine sound, skid sound when off road, best-lap time.
 
+## Neon Night
+
+The new look for the game: a night city with glowing curbs and neon cars. The full description, colors and rules are in `LOOK_AND_FEEL.md`. The pictures are `design/neon-night.png` and `design/car1.png`.
+
+Rules for every step here: do not change any `DRIVE` or `JUMP` numbers, the game must still build into the single offline HTML file, and it has to stay smooth on the Chromebook in split screen.
+
+### Neon Night 1: Theme block
+Ask: "Add `THEME` with the sky, fog, ground, road and light colors, and switch the scene to night. Nothing else changes yet."
+
+### Neon Night 2: Glowing track
+Ask: "Recolor the curbs to alternating cyan and magenta, add the dashed cyan center line, and make both glow. Recolor the speed pads and mud."
+
+### Neon Night 3: City
+Ask: "Remove the trees. Add the buildings with lit windows and the stars."
+
+After this step, rebuild the offline file and test it on the Chromebook.
+
+### Neon Night 4: Car 1
+Ask: "Add the `CARS` list and build the orange coupe from `design/car1.png`. Player 1 drives it."
+
+### Neon Night 5: Car 2
+Ask: "Add the green version for player 2."
+
+### Neon Night 6: Car lights
+Ask: "Underglow for both cars, glowing tail lights, then headlights if it stays smooth."
+
+### Neon Night 7: HUD
+Ask: "Restyle the lap counter, warnings, countdown and place screens."
+
+### Neon Night 8: Bloom test
+Ask: "Add bloom behind `THEME.BLOOM`. Test on the Chromebook from the offline file. Keep it on only if the game stays smooth."
+
+After this step, rebuild the offline file and test it on the Chromebook again.
+
 ## After every step
 
 1. Play-test with both players.

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" role="img" aria-label="Side view of an original low-poly neon orange sports coupe with a rear wing" style="display: block"><rect width="900" height="420" fill="#0b0f2a"></rect>
+<rect x="0" y="336" width="900" height="84" fill="#101536"></rect>
+<line x1="0" y1="336" x2="900" y2="336" stroke="#19e6ff" stroke-width="2" opacity="0.5"></line>
+<ellipse cx="445" cy="340" rx="340" ry="14" fill="#ff6a00" opacity="0.45"></ellipse>
+<polygon points="330,232 420,180 540,176 660,222 560,244 345,250" fill="#c24e00"></polygon>
+<polygon points="352,240 424,190 480,188 482,240" fill="#0b0f2a"></polygon>
+<polygon points="492,240 490,188 536,186 628,224 556,238" fill="#0b0f2a"></polygon>
+<polygon points="366,236 422,196 440,195 392,236" fill="#2f4380"></polygon>
+<polygon points="130,262 330,232 345,250 140,278" fill="#ff8f3d"></polygon>
+<polygon points="560,244 660,222 750,228" fill="#ff8f3d"></polygon>
+<polygon points="105,290 130,262 140,278 150,322 120,322" fill="#c24e00"></polygon>
+<polygon points="140,278 345,250 350,322 150,322" fill="#ff6a00"></polygon>
+<polygon points="345,250 560,244 565,322 350,322" fill="#ff7414"></polygon>
+<polygon points="560,244 750,228 770,250 765,322 565,322" fill="#f06000"></polygon>
+<polygon points="150,322 765,322 760,332 155,332" fill="#8f3a00"></polygon>
+<polygon points="118,276 150,262 158,270 124,286" fill="#fff3b0"></polygon>
+<polygon points="756,236 770,250 768,262 752,246" fill="#ff2040"></polygon>
+<polygon points="310,292 580,288 580,296 310,300" fill="#19e6ff"></polygon>
+<polygon points="310,304 580,300 580,305 310,309" fill="#ff2bd6"></polygon>
+<polygon points="688,226 700,226 708,200 698,200" fill="#8f3a00"></polygon>
+<polygon points="728,228 740,228 746,198 736,198" fill="#8f3a00"></polygon>
+<polygon points="672,196 782,188 786,197 676,205" fill="#c24e00"></polygon>
+<polygon points="772,180 792,180 792,208 772,208" fill="#19e6ff"></polygon>
+<circle cx="250" cy="304" r="52" fill="#05060f"></circle>
+<circle cx="640" cy="304" r="52" fill="#05060f"></circle>
+<circle cx="250" cy="304" r="44" fill="#151829"></circle>
+<circle cx="640" cy="304" r="44" fill="#151829"></circle>
+<polygon points="278,304 264,328 236,328 222,304 236,280 264,280" fill="#c9d3ff"></polygon>
+<polygon points="668,304 654,328 626,328 612,304 626,280 654,280" fill="#c9d3ff"></polygon>
+<line x1="222" y1="304" x2="278" y2="304" stroke="#5d6a99" stroke-width="4"></line>
+<line x1="236" y1="280" x2="264" y2="328" stroke="#5d6a99" stroke-width="4"></line>
+<line x1="264" y1="280" x2="236" y2="328" stroke="#5d6a99" stroke-width="4"></line>
+<line x1="612" y1="304" x2="668" y2="304" stroke="#5d6a99" stroke-width="4"></line>
+<line x1="626" y1="280" x2="654" y2="328" stroke="#5d6a99" stroke-width="4"></line>
+<line x1="654" y1="280" x2="626" y2="328" stroke="#5d6a99" stroke-width="4"></line>
+<circle cx="250" cy="304" r="8" fill="#151829"></circle>
+<circle cx="640" cy="304" r="8" fill="#151829"></circle>
+</svg>

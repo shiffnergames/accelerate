@@ -121,6 +121,12 @@
     // back down and in until it's just flat road again, so you drive straight onto it and straight off.
     walls:[
       {at:[0.45,0.62], length:130, side:1, height:12, width:20},   // banked turn on the outside of the big left-hand turn at the top of the inner loop (runs onto both legs so the ends are gentle)
+    ],
+    // Deer: a herd of deer waits beside the road at `at`. When a car gets within `warn` units of them
+    // (coming round the corner), they all run across. `herd` is how many deer, `side` is where they wait
+    // first (1 = right as you drive, -1 = left). A bigger `warn` means they're further across by the time you get there.
+    deer:[
+      {at:[0.90,0.30], warn:45, side:1, herd:6},   // right straight, just after the top-right corner, before the speed pad. 45 = they bolt as you come out of the corner
     ]
   };
   // Size of the drawing page in world units (portrait page, 3:4).
@@ -139,6 +145,29 @@
     GRASS_DRAG:0.35,// like DRAG, but on the grass. Lower = the grass grabs the car harder
     BOUNCE:1.5,     // how hard cars ricochet off each other. 1 = perfect bounce, 0 = a dull thud
     SPIN:0.1,       // how much a bump to the back half of a car makes it swerve. 0 = never swerves
+  };
+
+  // ===================== LOOK (NEON NIGHT) =====================
+  // The colours and lights of the world. See LOOK_AND_FEEL.md for the whole plan.
+  // Change one in the console and it shows straight away, no reload:
+  //   ACCEL.THEME.SKY=0x200040      (a string works too: ACCEL.THEME.SKY='#200040')
+  const THEME={
+    SKY:0x0b0f2a,            // the night sky: flat dark navy
+    FOG:0x0b0f2a,            // far-away things fade into this colour. Same as the sky, so the horizon melts away
+    GROUND:0x101536,         // the ground beside the road (where the grass was)
+    ROAD:0x1c2033,           // the road, and the banked turn (it's the road tipped up)
+    AMBIENT_SKY:0xaab4ff,    // soft light from above. Cool blue, so things in the dark look dark blue, not black
+    AMBIENT_GROUND:0x1a2152, // soft light from below, on the shaded sides and undersides of things
+    AMBIENT_POWER:0.75,      // how strong that soft light is. Lower = a darker night (0.7 was daytime)
+    MOON:0xc9d3ff,           // the one light that comes from a direction (it used to be the sun). It makes the shadows
+    MOON_POWER:0.35,         // how strong the moon is (0.9 was the daytime sun)
+    SHADOWS:true,            // shadows under the cars and scenery. Set to false if the Chromebook gets choppy
+    TAIL:0xff2040,           // tail lights: glowing red
+    HEADLIGHT:0xfff3b0,      // headlights: warm white. Both the lamps on the car and the beam on the road
+    HEADLIGHTS:true,         // the beams on the road ahead of each car. false = off
+    HEADLIGHT_POWER:0.5,     // how bright the beams are (0 = invisible, 1 = very bright)
+    UNDERGLOW:true,          // the pool of coloured light on the road under each car. false = off
+    UNDERGLOW_POWER:0.6,     // how bright the underglow is
   };
 
   // ===================== ZONES =====================
@@ -165,6 +194,16 @@
     RIM_BOUNCE:0.8, // how hard the fence at the top throws you back down the bank (0 = you can sit against it, 1 = full bounce)
     POP:0.6,        // how much of your climb speed you keep when you hit the fence (1 = a big hop straight up, 0 = no hop at all)
     FENCE:3.5,      // how tall the fence along the top is (just for looks, the top edge is what stops you)
+    CAM_GAP:2,      // the camera stays this far on the driver's side of the fence, so it never ends up behind the bank
+    CAM_LIFT:0.8,   // when the fence squeezes the camera in close to the car, it rises to look down over it (0 = stays low)
+  };
+
+  // ===================== DEER =====================
+  const DEER={
+    SPEED:9,        // how fast the deer run across the road (cars top out at 70). Slower = they're in your way for longer
+    SLOW:0.3,       // how much of your speed you keep if you hit one (0.3 = 30%)
+    REST:1,         // seconds the herd catches its breath on the far side before it will cross again
+    GAP:10,         // how far apart the rows of the herd run. Bigger = an easier gap to slip through
   };
 
   // CPS = checkpoints per lap. You must pass them all, in order, on the road, or the lap doesn't count
@@ -178,12 +217,12 @@
   renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
   renderer.shadowMap.enabled=true;
   const scene=new THREE.Scene();
-  scene.background=new THREE.Color(0x8fd3ff);
-  scene.fog=new THREE.Fog(0x8fd3ff,160,460);
+  scene.background=new THREE.Color(THEME.SKY);
+  const fog=new THREE.Fog(THEME.FOG,160,460); scene.fog=fog;
 
-  // Lights
-  scene.add(new THREE.HemisphereLight(0xffffff,0x3a6b2a,0.7));
-  const sun=new THREE.DirectionalLight(0xffffff,0.9);
+  // Lights: a soft glow from all around (hemi), and the moon, which comes from one direction and casts the shadows
+  const hemi=new THREE.HemisphereLight(THEME.AMBIENT_SKY,THEME.AMBIENT_GROUND,THEME.AMBIENT_POWER); scene.add(hemi);
+  const sun=new THREE.DirectionalLight(THEME.MOON,THEME.MOON_POWER);
   sun.position.set(120,180,80); sun.castShadow=true;
   sun.shadow.mapSize.set(2048,2048);
   Object.assign(sun.shadow.camera,{left:-220,right:220,top:220,bottom:-220,far:600});
@@ -205,7 +244,7 @@
   const lapLength=samples.length*samples[0].p.distanceTo(samples[1].p);
 
   // Grass
-  const grass=new THREE.Mesh(new THREE.PlaneGeometry(900,900),new THREE.MeshLambertMaterial({color:0x4a9a4a}));
+  const grass=new THREE.Mesh(new THREE.PlaneGeometry(900,900),new THREE.MeshLambertMaterial({color:THEME.GROUND}));   // the ground (it was grass in the daytime look)
   grass.rotation.x=-Math.PI/2; grass.receiveShadow=true; scene.add(grass);
 
   // Ribbon: a strip of road `count` samples long starting at sample `start`, two vertices per sample
@@ -223,7 +262,7 @@
     const m=new THREE.Mesh(g,new THREE.MeshLambertMaterial({color}));
     m.position.y=y; m.receiveShadow=true; scene.add(m); return m;
   }
-  ribbon(0,N,TRACK.width,0x444a52,0.02);   // the road
+  const roadMats=[ribbon(0,N,TRACK.width,THEME.ROAD,0.02).material];   // the road. (roadMats = everything painted road colour)
 
   // Zones: work out which samples each zone covers (zoneAt[i] = the zone at sample i, or null), and draw them
   const zoneAt=new Array(N).fill(null), spacing=samples[0].p.distanceTo(samples[1].p);
@@ -336,7 +375,8 @@
       g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(v),3)); g.setIndex(ix); g.computeVertexNormals();
       const m=new THREE.Mesh(g,mat); m.position.y=lift; m.receiveShadow=true; scene.add(m); };
     const lam=(color,extra)=>new THREE.MeshLambertMaterial(Object.assign({color,side:THREE.DoubleSide},extra||{}));
-    build(pos,idx,lam(0x444a52),0);                                 // the bank itself, same colour as the road
+    const bankMat=lam(THEME.ROAD); roadMats.push(bankMat);
+    build(pos,idx,bankMat,0);                                       // the bank itself, same colour as the road
     build(band.foot,bidx,lam(0xe8e8e8),0.04);                       // white line along where the road's edge would be
     build(band.lip,bidx,lam(0x2b2f36),0.04);                        // dark lip along the top
     build(band.back,bidx,lam(0x5c636e),0);                          // back face
@@ -378,14 +418,17 @@
   // Is this spot over a bank (or within `margin` behind its top edge)? Gives back the bank's nearest road
   // sample {i,d}, or null. Used to keep cars on the bank they're riding and to keep trees off it.
   function overWall(x,z,margin){
-    for(const w of wallList){
-      let best=0, bd=Infinity;
-      for(let j=0;j<=w.count;j++){ const p=samples[(w.start+j)%N].p, d=(p.x-x)*(p.x-x)+(p.z-z)*(p.z-z); if(d<bd){bd=d;best=(w.start+j)%N;} }
-      const q=wallSpot(w,x,z,best); if(!q) continue;
-      const u=w.side*q.c-w.edge;
-      if(u>0&&u<=wallReach(w,envAt(w,q.jf))+margin) return {i:best,d:Math.sqrt(bd)};
-    }
+    for(const w of wallList){ const q=wallPoint(w,x,z); if(q&&q.u>0&&q.u<=q.reach+margin) return {i:q.i,d:q.d}; }
     return null;
+  }
+  // wallSpot for any spot, without knowing which bit of road is nearest. It also adds: i and d (the bank's nearest
+  // road sample and how far away it is), u (how far up the bank from its foot), env and reach (how much bank there is here).
+  function wallPoint(w,x,z){
+    let best=0, bd=Infinity;
+    for(let j=0;j<=w.count;j++){ const p=samples[(w.start+j)%N].p, d=(p.x-x)*(p.x-x)+(p.z-z)*(p.z-z); if(d<bd){bd=d;best=(w.start+j)%N;} }
+    const q=wallSpot(w,x,z,best); if(!q) return null;
+    q.i=best; q.d=Math.sqrt(bd); q.u=w.side*q.c-w.edge; q.env=envAt(w,q.jf); q.reach=wallReach(w,q.env);
+    return q;
   }
 
   // What's under this spot? null on plain ground. On a ramp or a wall: {y, slope, rim}.
@@ -448,6 +491,7 @@
     while(placed<80&&tries<2000){ tries++;
       const x=(Math.random()-0.5)*(PAGE_W+140), z=(Math.random()-0.5)*(PAGE_H+140);
       if(nearest(x,z).d<TRACK.width/2+5||overWall(x,z,6)) continue;   // not on the road, not on a bank
+      if((TRACK.deer||[]).some(d=>Math.hypot(x-(d.at[0]-0.5)*PAGE_W,z-(d.at[1]-0.5)*PAGE_H)<TRACK.width/2+12+Math.ceil((d.herd??1)/2)*DEER.GAP)) continue;   // not where a herd of deer waits
       const trunk=new THREE.Mesh(new THREE.CylinderGeometry(0.4,0.5,3),new THREE.MeshLambertMaterial({color:0x6b4a2b}));
       const top=new THREE.Mesh(new THREE.ConeGeometry(2.5,6,8),new THREE.MeshLambertMaterial({color:0x2f7a3a}));
       trunk.position.set(x,1.5,z); top.position.set(x,6,z); top.castShadow=true;
@@ -488,16 +532,142 @@
     }
     scene.add(g); return g;
   }
+  // Car lights. These are not real lamps (real ones would be slow on a Chromebook): the lamps are blocks painted
+  // with a colour that ignores the dark, and the beam and underglow are see-through shapes lying on the road that
+  // ADD their colour to whatever is under them, bright in the middle and fading to nothing at the edges.
+  const tailMat=new THREE.MeshBasicMaterial({color:THEME.TAIL}), lampMat=new THREE.MeshBasicMaterial({color:THEME.HEADLIGHT});
+  const glowMaterial=()=>new THREE.MeshBasicMaterial({vertexColors:true,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide,fog:false});
+  function buildCarLights(g){
+    for(const x of [-0.6,0.6]){
+      const tail=new THREE.Mesh(new THREE.BoxGeometry(0.55,0.22,0.08),tailMat); tail.position.set(x,0.85,-2.02); g.add(tail);
+      const lamp=new THREE.Mesh(new THREE.BoxGeometry(0.45,0.22,0.08),lampMat); lamp.position.set(x,0.8,2.02); g.add(lamp);
+    }
+    // Headlight beam: a fan on the road in front of the car. Rows from the bumper outwards: [how far ahead, half width, brightness]
+    const rows=[[2.1,0.9,1],[5,1.7,0.8],[10,3,0.4],[17,4.4,0]], pos=[], col=[], idx=[];
+    rows.forEach(([z,hw,b],r)=>{
+      pos.push(-hw,0,z, 0,0,z, hw,0,z); col.push(0,0,0, b,b,b, 0,0,0);   // dark edges, bright middle
+      if(r<rows.length-1){ const a=r*3; idx.push(a,a+3,a+1, a+1,a+3,a+4, a+1,a+4,a+2, a+2,a+4,a+5); }
+    });
+    const bg=new THREE.BufferGeometry();
+    bg.setAttribute('position',new THREE.BufferAttribute(new Float32Array(pos),3)); bg.setAttribute('color',new THREE.BufferAttribute(new Float32Array(col),3)); bg.setIndex(idx);
+    const beam=new THREE.Mesh(bg,glowMaterial()); beam.position.y=0.09; g.add(beam);
+    // Underglow: an oval under the car, bright in the middle
+    const gg=new THREE.CircleGeometry(1,24); gg.rotateX(-Math.PI/2);
+    const gc=new Float32Array(gg.attributes.position.count*3); gc[0]=gc[1]=gc[2]=1;   // vertex 0 is the middle of the circle
+    gg.setAttribute('color',new THREE.BufferAttribute(gc,3));
+    const glow=new THREE.Mesh(gg,glowMaterial()); glow.scale.set(2.6,1,3.6); glow.position.y=0.08; g.add(glow);
+    return {beam,glow};
+  }
   function makeCar(color,side,keys){
     // a = which way the car points. vx,vz = which way it is actually moving (not always the same when sliding!)
     // vy = up/down speed, air = true while the car is off the ground
-    return {mesh:buildCar(color),keys,side,a:0,vx:0,vz:0,vy:0,air:false,speed:0,lap:1,cp:0,time:0,done:false,finishTime:0,
+    const mesh=buildCar(color);
+    return {mesh,color,...buildCarLights(mesh),keys,side,a:0,vx:0,vz:0,vy:0,air:false,speed:0,lap:1,cp:0,time:0,done:false,finishTime:0,
       cam:new THREE.PerspectiveCamera(60,1,0.5,500)};
   }
   const cars=[
     makeCar(0xff5a3c, 1,{up:'KeyW',down:'KeyS',left:'KeyA',right:'KeyD'}),
     makeCar(0x3cc8ff,-1,{up:'ArrowUp',down:'ArrowDown',left:'ArrowLeft',right:'ArrowRight'})
   ];
+
+  // ===================== DEER =====================
+  // A deer is boxes, like the cars. It faces +z, the legs hang from the hips so they can swing.
+  function buildDeer(){
+    const g=new THREE.Group(), legs=[];
+    const fur=new THREE.MeshLambertMaterial({color:0x9a6a3a}), dark=new THREE.MeshLambertMaterial({color:0x6e4a26});
+    const pale=new THREE.MeshLambertMaterial({color:0xf4efe2}), black=new THREE.MeshLambertMaterial({color:0x1c1712});
+    const box=(w,h,d,mat,x,y,z,parent)=>{ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat); m.position.set(x,y,z); m.castShadow=true; (parent||g).add(m); return m; };
+    box(0.9,0.9,2.2,fur,0,1.65,0);                                   // body
+    box(0.4,1.1,0.4,fur,0,2.4,0.95).rotation.x=0.35;                 // neck, leaning forward
+    box(0.5,0.5,0.9,fur,0,2.95,1.4);                                 // head
+    box(0.3,0.2,0.12,black,0,2.85,1.88);                             // nose
+    box(0.3,0.35,0.15,pale,0,1.95,-1.15);                            // white tail
+    for(const sx of [-1,1]){                                         // antlers: a main spike and one prong each
+      box(0.09,0.8,0.09,pale,sx*0.2,3.55,1.15).rotation.z=-sx*0.3;
+      box(0.09,0.4,0.09,pale,sx*0.38,3.7,1.3).rotation.z=-sx*0.9;
+      box(0.12,0.3,0.25,fur,sx*0.33,3.2,1.05);                       // ear
+    }
+    for(const [x,z] of [[-0.3,0.85],[0.3,0.85],[-0.3,-0.85],[0.3,-0.85]]){
+      const hip=new THREE.Group(); hip.position.set(x,1.25,z); g.add(hip);
+      box(0.22,1.25,0.22,dark,0,-0.625,0,hip); legs.push(hip);
+    }
+    scene.add(g); return {mesh:g,legs};
+  }
+  // A herd: deer that wait together beside the road and all run across together, in rows of two.
+  //   i     = the road sample where they cross
+  //   side  = which side they're waiting on right now (1 = right as you drive, -1 = left)
+  //   s     = how far they've run on this crossing (0 = still waiting, `run` = all the way across)
+  //   state = 'wait', 'run' or 'rest'
+  // Each deer has r = how far back from the road it stands (the front row reaches the road first)
+  // and a = a little offset along the road, so they look like a herd and not a queue.
+  const herds=[];
+  for(const d of TRACK.deer||[]){
+    const i=nearest((d.at[0]-0.5)*PAGE_W,(d.at[1]-0.5)*PAGE_H).i, side=d.side??1;
+    const H={i, warnCount:Math.round((d.warn??80)/spacing), far:TRACK.width/2+4, home:side, side, s:0, t:0, state:'wait', rest:0, seen:cars.map(()=>false), deer:[]};
+    for(let k=0;k<(d.herd??1);k++){
+      const row=Math.floor(k/2);   // two deer to a row, the second one a step behind and a few steps along the road
+      H.deer.push({...buildDeer(), r0:row*DEER.GAP+(k%2)*1.3, r:0, a:(k%2?2.8:-2.8)+((k*37)%10-5)*0.2, y:0, vy:0, phase:k*1.7, touch:cars.map(()=>false)});
+    }
+    H.depth=Math.max(...H.deer.map(q=>q.r0));   // how far back the last row stands
+    H.run=2*H.far+H.depth;                      // how far every deer runs, so the whole herd ends up clear on the other side
+    herds.push(H);
+    // A deer-crossing sign a little way before them, on the side where they wait
+    const s=samples[(i-Math.round(30/spacing)+N)%N], sign=new THREE.Group();
+    sign.position.copy(s.p).addScaledVector(s.n,side*(TRACK.width/2+2.5)); sign.rotation.y=-Math.atan2(s.t.z,s.t.x)+Math.PI/2;
+    const post=new THREE.Mesh(new THREE.CylinderGeometry(0.12,0.12,4),new THREE.MeshLambertMaterial({color:0x8a8f96})); post.position.y=2; sign.add(post);
+    const plate=new THREE.Mesh(new THREE.BoxGeometry(2,2,0.1),new THREE.MeshLambertMaterial({color:0xffd23c})); plate.position.y=4.6; plate.rotation.z=Math.PI/4; plate.castShadow=true; sign.add(plate);
+    const ink=new THREE.MeshLambertMaterial({color:0x1c1712});   // a tiny deer on the sign: body, neck, legs
+    for(const [w,h,x,y] of [[0.9,0.35,0,4.65],[0.2,0.5,0.4,4.95],[0.14,0.45,-0.32,4.3],[0.14,0.45,0.32,4.3]]){ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,0.16),ink); m.position.set(x,y,0); sign.add(m); }
+    scene.add(sign);
+  }
+  function placeHerd(H){
+    const s=samples[H.i], running=H.state==='run';
+    const face=H.state==='rest'?H.side:-H.side;   // waiting or running: facing across the road. Resting: still facing the way they ran
+    for(const q of H.deer){
+      const off=H.side*(H.far+q.r-H.s), swing=running?Math.sin(H.t*16+q.phase)*0.8:0;   // off = how far across the road (+ = right of the middle)
+      q.mesh.position.set(s.p.x+s.n.x*off+s.t.x*q.a, q.y+(running?Math.abs(Math.sin(H.t*16+q.phase))*0.25:0), s.p.z+s.n.z*off+s.t.z*q.a);
+      q.mesh.rotation.y=-Math.atan2(s.n.z*face,s.n.x*face)+Math.PI/2;
+      q.legs.forEach((leg,k)=>{ leg.rotation.x=(k===0||k===3)?swing:-swing; });   // opposite corners swing together
+    }
+  }
+  function resetDeer(){
+    for(const H of herds){
+      H.side=H.home; H.s=0; H.t=0; H.state='wait'; H.rest=0; H.seen.fill(false);
+      for(const q of H.deer){ q.r=q.r0; q.y=0; q.vy=0; q.touch.fill(false); }
+      placeHerd(H);
+    }
+  }
+  function updateDeer(dt){
+    for(const H of herds){
+      cars.forEach((c,k)=>{
+        const p=c.mesh.position, near=locate(p.x,p.z), back=(H.i-near.i+N)%N;   // back = how many samples before the crossing the car is
+        // Coming round the corner: a car inside the warning distance makes a waiting herd bolt for the other side.
+        // Each car sets them off once per pass (seen), so they don't run back and forth in front of the same car.
+        const inZone=!c.done&&back<=H.warnCount&&near.d<=TRACK.width;
+        if(!inZone) H.seen[k]=false;
+        else if(!H.seen[k]&&H.state==='wait'){ H.seen[k]=true; H.state='run'; H.t=0; }
+        // Bump! The car loses most of its speed (only once a second, so clipping two deer isn't twice as bad).
+        // The deer is fine: it leaps and carries on. A car flying over a deer, or a deer leaping over the car, doesn't count.
+        for(const q of H.deer){
+          const dp=q.mesh.position, hit=!c.done&&Math.hypot(p.x-dp.x,p.z-dp.z)<2.4&&Math.abs(p.y-q.y)<2;
+          if(hit&&!q.touch[k]){ if(!(c.deerMsg>0)){ c.vx*=DEER.SLOW; c.vz*=DEER.SLOW; c.deerMsg=1; } if(q.y===0) q.vy=18; }
+          q.touch[k]=hit;
+        }
+      });
+      if(H.state==='run'){
+        H.t+=dt; H.s+=DEER.SPEED*dt;
+        if(H.s>=H.run){   // everyone's across: the herd now lives on the other side, with the rows flipped so the nearest row leads next time
+          H.side=-H.side; H.s=0; for(const q of H.deer) q.r=H.depth-q.r;
+          H.state='rest'; H.rest=DEER.REST;
+        }
+      } else if(H.state==='rest'){
+        H.rest-=dt; if(H.rest<=0) H.state='wait';   // turn round to watch the road again
+      }
+      for(const q of H.deer) if(q.vy||q.y>0){ q.vy-=JUMP.GRAVITY*dt; q.y+=q.vy*dt; if(q.y<=0){ q.y=0; q.vy=0; } }   // the leap
+      placeHerd(H);
+    }
+  }
+
   const keys={};
   let overhead=false;
   addEventListener('keydown',e=>{
@@ -516,10 +686,11 @@
       c.a=Math.atan2(s.t.z,s.t.x);
       // Cars start just behind the line, in the last checkpoint. Crossing the line makes it lap 1.
       c.vx=0; c.vz=0; c.speed=0; c.spin=0; c.lap=0; c.cp=CPS-1; c.warn=''; c.time=0; c.done=false; c.finishTime=0;
-      c.zone=null; c.effect=null; c.effectTime=0; c.kick=0; c.vy=0; c.air=false;
+      c.zone=null; c.effect=null; c.effectTime=0; c.kick=0; c.vy=0; c.air=false; c.deerMsg=0;
       c.mesh.rotation.y=-c.a+Math.PI/2; c.mesh.rotation.x=0; c.mesh.rotation.z=0;
       updateCam(c,true);
     }
+    resetDeer();
   }
 
   // ===================== RACE STATE =====================
@@ -620,18 +791,27 @@
       }
       c.mesh.rotation.y=-c.a+Math.PI/2;
       // Tip the nose to match: up going up, down coming down (eased so landings don't snap)
-      const pitch=-Math.atan2(c.vy,Math.max(5,Math.abs(vf)));
-      c.mesh.rotation.x+=(pitch-c.mesh.rotation.x)*Math.min(1,12*dt);
-      // Lean sideways to match a banked wall: the side of the car that's higher up the bank lifts
-      const nn=samples[now.i].n, roll=under&&!c.air?-Math.atan(under.slope*(nn.x*side.x+nn.z*side.z)):0;
-      c.mesh.rotation.z+=(roll-c.mesh.rotation.z)*Math.min(1,12*dt);
+      let pitch=-Math.atan2(c.vy,Math.max(5,Math.abs(vf))), roll=0, ease=Math.min(1,12*dt);
+      // On a bank the car sits on the ground that's really under it. We measure how high the bank is at the nose,
+      // the tail and both sides, and tilt the car to match. (Going by speed isn't enough here: a sliding car points
+      // one way and moves another, and its tail would sink into the slope.)
+      if(under&&under.wall&&!c.air){
+        const fx=Math.cos(c.a), fz=Math.sin(c.a);   // where the car points now, after this frame's steering
+        const high=(ahead,right)=>{ const q={x:p.x+fx*ahead-fz*right,z:p.z+fz*ahead+fx*right}, at=groundAt(q,now); return at&&at.wall?at.y:0; };
+        const climb=(high(2,0)-high(-2,0))/4, lean=(high(0,1)-high(0,-1))/2;   // how fast the ground rises toward the nose, and toward the right side
+        pitch=-Math.atan(climb); roll=-Math.atan(lean*Math.cos(pitch)); ease=1;   // (no easing here: the ground is right under the wheels)
+      }
+      c.mesh.rotation.x+=(pitch-c.mesh.rotation.x)*ease;
+      c.mesh.rotation.z+=(roll-c.mesh.rotation.z)*ease;
       // Lap counting: the lap is split into CPS checkpoints that must be passed in order,
       // and a checkpoint only counts if you're on the road, just beside it, or up on a bank (no cutting across the grass).
       const s=Math.floor(now.i*CPS/N), ahead=(s-c.cp+CPS)%CPS;   // how many checkpoints past the last one you earned
       if(ahead===1&&(now.d<=TRACK.width||under)){ c.cp=s; if(s===0){ c.lap++; if(c.lap>LAPS){ c.done=true; c.finishTime=c.time; c.lap=LAPS; carFinished(c); } } }
       c.warn=ahead<=1?'':ahead<=CPS/2?'GO BACK TO THE TRACK':'WRONG WAY';
+      if(c.deerMsg>0){ c.deerMsg-=dt; if(!c.warn) c.warn='OH DEER!'; }   // just bumped the deer
       updateCam(c,false,dt);
     }
+    updateDeer(dt);
     // Car-vs-car ricochet: like two billiard balls of the same weight
     const [A,B]=cars, a=A.mesh.position, b=B.mesh.position;
     const dx=b.x-a.x, dz=b.z-a.z, d=Math.hypot(dx,dz);
@@ -654,11 +834,26 @@
     }
   }
   function updateCam(c,snap,dt){
-    const p=c.mesh.position;
+    const p=c.mesh.position, bx=-Math.cos(c.a)*12, bz=-Math.sin(c.a)*12;   // (bx,bz) = from the car back to the camera's usual spot
+    // Banks: the camera has to stay on the driver's side of the fence, or all you'd see is the back of the bank.
+    // If the usual spot is past the fence, the camera closes in on the car until it fits, and rises to look down
+    // over the car instead. keep = how much of the usual distance is left (found by halving the gap 6 times).
+    let keep=1;
+    const mine=wallList.filter(w=>{ const me=wallPoint(w,p.x,p.z); return me&&me.u<=me.reach+WALL_BACK; });   // banks this car is in front of
+    const blocked=k=>mine.some(w=>{ const q=wallPoint(w,p.x+bx*k,p.z+bz*k); return q&&q.env*w.height>=2&&q.u>q.reach-HALFPIPE.CAM_GAP; });
+    if(mine.length&&blocked(1)){ let lo=0, hi=1; for(let n=0;n<6;n++){ const mid=(lo+hi)/2; if(blocked(mid)) hi=mid; else lo=mid; } keep=lo; }
     // The camera sits behind and above the car and rises with it, so a jump lifts the whole view
-    const target=new THREE.Vector3(p.x-Math.cos(c.a)*12,p.y+7,p.z-Math.sin(c.a)*12);
+    const target=new THREE.Vector3(p.x+bx*keep,p.y+7+(1-keep)*12*HALFPIPE.CAM_LIFT,p.z+bz*keep);
     // Glide toward the target spot (same smoothness whatever the frame rate: about 88% of the gap closes each 1/60 s)
     if(snap) c.cam.position.copy(target); else c.cam.position.lerp(target,1-Math.pow(0.0005,dt));
+    // A safety net for while it's gliding: never past the fence, never down inside the slope
+    const cp=c.cam.position;
+    for(const w of mine){
+      const q=wallPoint(w,cp.x,cp.z); if(!q||q.u<=0) continue;
+      const tall=Math.max(0,Math.min(1,q.env*w.height/2-0.5)), over=(q.u-(q.reach-HALFPIPE.CAM_GAP))*tall;   // tall: 0 where the bank has faded away, 1 where it's a real wall
+      let u=q.u; if(over>0){ u-=over; cp.x-=over*w.side*q.nx; cp.z-=over*w.side*q.nz; }
+      cp.y=Math.max(cp.y,q.env*w.height*(Math.min(u,q.reach)/q.reach)**2+2.5);
+    }
     c.cam.lookAt(p.x+Math.cos(c.a)*6,p.y+1.5,p.z+Math.sin(c.a)*6);
   }
 
@@ -674,10 +869,25 @@
     mapCam.left=-halfW; mapCam.right=halfW; mapCam.top=halfH; mapCam.bottom=-halfH; mapCam.updateProjectionMatrix();
     return [w,h];
   }
+  // Push the THEME colours and lights into the scene. Runs every frame (it's only a handful of numbers),
+  // which is why changing ACCEL.THEME in the console shows up straight away.
+  function applyTheme(){
+    scene.background.set(THEME.SKY); fog.color.set(THEME.FOG);
+    grass.material.color.set(THEME.GROUND);
+    for(const m of roadMats) m.color.set(THEME.ROAD);
+    hemi.color.set(THEME.AMBIENT_SKY); hemi.groundColor.set(THEME.AMBIENT_GROUND); hemi.intensity=THEME.AMBIENT_POWER;
+    sun.color.set(THEME.MOON); sun.intensity=THEME.MOON_POWER; sun.castShadow=!!THEME.SHADOWS;
+    tailMat.color.set(THEME.TAIL); lampMat.color.set(THEME.HEADLIGHT);
+    for(const c of cars){   // (the beam and underglow lie on the road, so they switch off while the car is flying)
+      c.beam.visible=!!THEME.HEADLIGHTS&&!c.air; c.beam.material.color.set(THEME.HEADLIGHT).multiplyScalar(THEME.HEADLIGHT_POWER);
+      c.glow.visible=!!THEME.UNDERGLOW&&!c.air; c.glow.material.color.set(c.color).multiplyScalar(THEME.UNDERGLOW_POWER);
+    }
+  }
   function render(){
     const [w,h]=resize();
+    applyTheme();
     if(overhead){
-      const fog=scene.fog; scene.fog=null; // fog would hide everything from this high up
+      scene.fog=null; // fog would hide everything from this high up
       renderer.setScissorTest(false); renderer.setViewport(0,0,w,h); renderer.render(scene,mapCam);
       scene.fog=fog;
     } else {
@@ -730,7 +940,7 @@
 
   // Handy for poking at the game from the browser console
   // e.g. ACCEL.DRIVE.GRIP=0.7 in the console changes the feel instantly, no reload
-  window.ACCEL={TRACK,DRIVE,ZONE_TYPES,JUMP,HALFPIPE,zoneAt,rampAt,wallAt,groundAt,groundY,samples,cars,keys,nearest,locate,lapLength,get state(){return state;}};
+  window.ACCEL={TRACK,DRIVE,THEME,ZONE_TYPES,JUMP,HALFPIPE,DEER,deer:herds,zoneAt,rampAt,wallAt,groundAt,groundY,samples,cars,keys,nearest,locate,lapLength,get state(){return state;}};
 })();
 </script>
 </body>
