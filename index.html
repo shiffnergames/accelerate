@@ -200,8 +200,8 @@
 
   // ===================== DEER =====================
   const DEER={
-    SPEED:9,        // how fast the deer run across the road (cars top out at 70). Slower = they're in your way for longer
-    SLOW:0.3,       // how much of your speed you keep if you hit one (0.3 = 30%)
+    SPEED:17,       // how fast the deer run across the road (cars top out at 70). Slower = they're in your way for longer
+    SLOW:0.3,       // how much of your speed you keep if you hit one (0.3 = 30%)s
     REST:1,         // seconds the herd catches its breath on the far side before it will cross again
     GAP:10,         // how far apart the rows of the herd run. Bigger = an easier gap to slip through
   };
@@ -623,9 +623,10 @@
   function placeHerd(H){
     const s=samples[H.i], running=H.state==='run';
     const face=H.state==='rest'?H.side:-H.side;   // waiting or running: facing across the road. Resting: still facing the way they ran
+    const stride=H.s*1.8;                         // the legs go by how far the herd has run, so faster deer take faster steps
     for(const q of H.deer){
-      const off=H.side*(H.far+q.r-H.s), swing=running?Math.sin(H.t*16+q.phase)*0.8:0;   // off = how far across the road (+ = right of the middle)
-      q.mesh.position.set(s.p.x+s.n.x*off+s.t.x*q.a, q.y+(running?Math.abs(Math.sin(H.t*16+q.phase))*0.25:0), s.p.z+s.n.z*off+s.t.z*q.a);
+      const off=H.side*(H.far+q.r-H.s), swing=running?Math.sin(stride+q.phase)*0.8:0;   // off = how far across the road (+ = right of the middle)
+      q.mesh.position.set(s.p.x+s.n.x*off+s.t.x*q.a, q.y+(running?Math.abs(Math.sin(stride+q.phase))*0.25:0), s.p.z+s.n.z*off+s.t.z*q.a);
       q.mesh.rotation.y=-Math.atan2(s.n.z*face,s.n.x*face)+Math.PI/2;
       q.legs.forEach((leg,k)=>{ leg.rotation.x=(k===0||k===3)?swing:-swing; });   // opposite corners swing together
     }
