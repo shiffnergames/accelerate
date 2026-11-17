@@ -168,6 +168,11 @@
     HEADLIGHT_POWER:0.5,     // how bright the beams are (0 = invisible, 1 = very bright)
     UNDERGLOW:true,          // the pool of coloured light on the road under each car. false = off
     UNDERGLOW_POWER:0.6,     // how bright the underglow is
+    CURB_A:0x19e6ff,         // curbs: two blocks of this colour (cyan), then two of CURB_B, all the way round
+    CURB_B:0xff2bd6,         // the other curb colour (magenta). The fence on the banked turn uses it too
+    LINE:0x19e6ff,           // the dashed line down the middle of the road
+    RAMP:0xffd84d,           // the lights on the jump: its stripes, the rails down its edges and the bar across the lip (warm yellow)
+    GLOW_POWER:0.4,          // the soft light the curbs, the middle line, the jump and the bank's fence spill onto the ground. 0 = off
   };
 
   // ===================== ZONES =====================
@@ -176,9 +181,10 @@
   //   kick  = instant shove forward the moment you drive onto it
   //   drag  = like DRAG, the share of speed you keep per second while it's working on you
   //   time  = how many seconds the effect keeps going after you leave the patch
+  //   color = what it's painted. glow = true makes it shine in the dark (it ignores how dark the night is)
   const ZONE_TYPES={
-    boost:{color:0xffb300, speed:1.6, kick:80, drag:0.95, time:0.8},  // speed pad: a shove, then a higher top speed for a bit
-    mud:  {color:0x5b3a1e, speed:0.4, kick:0,  drag:0.6,  time:0},    // mud: slows you to 40% and grabs the tires
+    boost:{color:0x19e6ff, glow:true,  speed:1.6, kick:80, drag:0.95, time:0.8},  // speed pad: a shove, then a higher top speed for a bit
+    mud:  {color:0x8a5a2b, glow:false, speed:0.4, kick:0,  drag:0.6,  time:0},    // mud: slows you to 40% and grabs the tires
   };
 
   // ===================== JUMPS =====================
@@ -264,6 +270,39 @@
   }
   const roadMats=[ribbon(0,N,TRACK.width,THEME.ROAD,0.02).material];   // the road. (roadMats = everything painted road colour)
 
+  // Neon: things that glow are painted with a colour that ignores how dark the night is. Like the car lights,
+  // these are not real lamps. The "glow" a curb throws on the ground is a see-through strip of its colour lying
+  // beside it, strongest in the middle and fading to nothing at its edges (haloTex is that fade).
+  const neon=color=>new THREE.MeshBasicMaterial({color,side:THREE.DoubleSide});
+  const haloTex=(()=>{ const cnv=document.createElement('canvas'); cnv.width=64; cnv.height=1;
+    const g=cnv.getContext('2d'), fade=g.createLinearGradient(0,0,64,0);
+    fade.addColorStop(0,'#000'); fade.addColorStop(0.3,'#555'); fade.addColorStop(0.5,'#fff'); fade.addColorStop(0.7,'#555'); fade.addColorStop(1,'#000');
+    g.fillStyle=fade; g.fillRect(0,0,64,1); return new THREE.CanvasTexture(cnv); })();
+  const halo=color=>new THREE.MeshBasicMaterial({color,alphaMap:haloTex,transparent:true,opacity:THEME.GLOW_POWER,depthWrite:false,side:THREE.DoubleSide});
+  const curbMat=[neon(THEME.CURB_A),neon(THEME.CURB_B)], curbHalo=[halo(THEME.CURB_A),halo(THEME.CURB_B)];
+  const lineMat=neon(THEME.LINE), lineHalo=halo(THEME.LINE);
+  const rampMat=neon(THEME.RAMP), rampHalo=halo(THEME.RAMP);
+  const fenceMat=new THREE.MeshBasicMaterial({color:THEME.CURB_B,transparent:true,opacity:0.25,side:THREE.DoubleSide});
+  const curbColour=(i,side)=>(Math.floor(i/2)+(side>0?0:1))%2;   // which of the two curb colours block i gets (0 or 1). The two edges are one step out of line
+  // paint(): collects flat strips lying on the ground into one shape. piece(a,b,off,half) adds a strip that runs
+  // from road point a to road point b, `off` to the right of the middle of the road and `half` wide each way.
+  // ya and yb lift its two ends off the ground (for a strip that climbs a ramp).
+  function paint(){
+    const pos=[], uv=[], idx=[];
+    return {
+      piece(a,b,off,half,ya=0,yb=0){
+        const k=pos.length/3;
+        for(const [s,y] of [[a,ya],[b,yb]]) for(const e of [-1,1]){ pos.push(s.p.x+s.n.x*(off+e*half),y,s.p.z+s.n.z*(off+e*half)); uv.push(e<0?0:1,0); }
+        idx.push(k,k+2,k+1, k+1,k+2,k+3);
+      },
+      mesh(mat,y){
+        const g=new THREE.BufferGeometry();
+        g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(pos),3)); g.setAttribute('uv',new THREE.BufferAttribute(new Float32Array(uv),2)); g.setIndex(idx);
+        const m=new THREE.Mesh(g,mat); m.position.y=y; scene.add(m); return m;
+      }
+    };
+  }
+
   // Zones: work out which samples each zone covers (zoneAt[i] = the zone at sample i, or null), and draw them
   const zoneAt=new Array(N).fill(null), spacing=samples[0].p.distanceTo(samples[1].p);
   for(const z of TRACK.zones){
@@ -274,21 +313,22 @@
     const mid=nearest((z.at[0]-0.5)*PAGE_W,(z.at[1]-0.5)*PAGE_H).i, half=Math.round(z.length/2/spacing);
     for(let j=-half;j<=half;j++) zoneAt[(mid+j+N)%N]=zone;
     const start=(mid-half+N)%N, count=half*2;
-    ribbon(start,count,width,kind.color,0.03,center);
-    if(z.type==='boost'){ // white chevrons pointing the way you should drive
+    const patch=ribbon(start,count,width,kind.color,0.03,center);
+    if(kind.glow) patch.material=neon(kind.color);
+    if(z.type==='boost'){ // dark chevrons pointing the way you should drive
       const sz=Math.min(2.5,width/2-0.5);
       const tri=new THREE.Shape(); tri.moveTo(-sz,-1.5); tri.lineTo(0,1.5); tri.lineTo(sz,-1.5); tri.lineTo(0,-0.3); tri.closePath();
       const geo=new THREE.ShapeGeometry(tri); geo.rotateX(-Math.PI/2);
       for(let j=-1;j<=1;j++){
         const s=samples[(mid+j*Math.round(4/spacing)+N)%N];
-        const chev=new THREE.Mesh(geo,new THREE.MeshLambertMaterial({color:0xffffff}));
+        const chev=new THREE.Mesh(geo,neon(0x0b0f2a));
         chev.position.copy(s.p).addScaledVector(s.n,center); chev.position.y=0.04; chev.rotation.y=-Math.atan2(s.t.z,s.t.x)-Math.PI/2; scene.add(chev);
       }
     } else { // darker splotches so mud looks lumpy
       const geo=new THREE.CircleGeometry(1.2,10); geo.rotateX(-Math.PI/2);
       for(let j=0;j<8;j++){
         const s=samples[(start+Math.floor(Math.random()*count))%N];
-        const blob=new THREE.Mesh(geo,new THREE.MeshLambertMaterial({color:0x3e2612}));
+        const blob=new THREE.Mesh(geo,new THREE.MeshLambertMaterial({color:0x5a3a1c}));
         blob.position.copy(s.p).addScaledVector(s.n,center+(Math.random()-0.5)*(width-3)); blob.position.y=0.04; scene.add(blob);
       }
     }
@@ -329,13 +369,23 @@
     const ramp={start:(mid-half+N)%N,count:half*2,height:r.height,width,center};
     for(let j=0;j<=ramp.count+1;j++) rampAt[(ramp.start+j)%N]=ramp;   // one extra so the lip itself is measured, not guessed
     wedge(ramp.start,ramp.count,width,r.height,0x6d7480,center);
-    // yellow stripes on the slope so you can see it coming
+    // Lights on the jump, so you can see it coming in the dark: glowing stripes across the slope and a bar across
+    // the lip, a glowing rail down each edge, and a strip of the same colour on the road at each side (its glow).
     const stripe=new THREE.PlaneGeometry(width-1,0.6); stripe.rotateX(-Math.PI/2);
-    for(let j=1;j<ramp.count;j+=2){
-      const s=samples[(ramp.start+j)%N], mk=new THREE.Mesh(stripe,new THREE.MeshLambertMaterial({color:0xffd23c}));
-      mk.position.copy(s.p).addScaledVector(s.n,center); mk.position.y=0.05+r.height*j/ramp.count;
-      mk.rotation.order='YXZ'; mk.rotation.y=-Math.atan2(s.t.z,s.t.x)-Math.PI/2; mk.rotation.x=Math.atan(r.height/(ramp.count*spacing)); scene.add(mk);
+    const tilt=Math.atan(r.height/(ramp.count*spacing)), yAt=j=>r.height*j/ramp.count;   // yAt = how high the slope is at road point j of the ramp
+    const bar=(j,back)=>{   // a stripe across the slope at road point j, `back` units before it
+      const s=samples[(ramp.start+j)%N], mk=new THREE.Mesh(stripe,rampMat);
+      mk.position.copy(s.p).addScaledVector(s.n,center).addScaledVector(s.t,-back); mk.position.y=0.05+yAt(j-back/spacing);
+      mk.rotation.order='YXZ'; mk.rotation.y=-Math.atan2(s.t.z,s.t.x)-Math.PI/2; mk.rotation.x=tilt; scene.add(mk);
+    };
+    for(let j=1;j<ramp.count;j+=2) bar(j,0);
+    bar(ramp.count,0.4);   // the lip
+    const rail=paint(), glow=paint(), hw=width/2;
+    for(let j=0;j<ramp.count;j++){
+      const a=samples[(ramp.start+j)%N], b=samples[(ramp.start+j+1)%N];
+      for(const e of [-1,1]){ rail.piece(a,b,center+e*(hw-0.2),0.2,0.06+yAt(j),0.06+yAt(j+1)); glow.piece(a,b,center+e*(hw+0.3),2.2); }
     }
+    rail.mesh(rampMat,0); glow.mesh(rampHalo,0.045);
   }
   // Walls (banked turns): the road curls up into a bank. wallAt[i] = the wall at sample i, or null.
   // Across the road, u = how far up the bank you are: 0 at the foot (the middle of the road), `reach` at
@@ -355,9 +405,11 @@
     for(let j=0;j<=wall.count;j++) wallAt[(wall.start+j)%N]=wall;
     wallList.push(wall);
     // The bank: a grid, one row per sample along the road, K strips across, smooth-shaded, the same colour as
-    // the road so it reads as the road tipping up. Plus a white line where the flat road's edge would be, a dark
-    // lip along the top, the back face down to the grass, and a see-through fence standing on the top edge.
-    const K=20, pos=[], idx=[], band={foot:[],lip:[],back:[],fence:[]}, bidx=[], posts=[];
+    // the road so it reads as the road tipping up. Plus a glowing line in the curb colours where the flat road's
+    // edge would be, a dark lip along the top, the back face down to the ground, and a see-through fence on the top edge.
+    // Lights on the bank: the lip along the top glows, the fence has a glowing rail along its top, and soft light
+    // spills down the bank from the fence (wash) and out from the edge line (footGlow). uv = where each strip fades.
+    const K=20, pos=[], idx=[], band={foot:[],lip:[],back:[],fence:[],rail:[],wash:[],footGlow:[]}, uv={wash:[],footGlow:[]}, bidx=[], fidx=[[],[]], posts=[];
     for(let j=0;j<=wall.count;j++){
       const s=samples[(wall.start+j)%N], env=wallEnv(wall,j), reach=wallReach(wall,env);
       const at=u=>{ const q=s.p.clone().addScaledVector(s.n,wall.side*(wall.edge+u)); return [q.x,0.03+env*wall.height*(u/reach)**2,q.z]; };
@@ -368,20 +420,28 @@
       band.lip.push(...at(reach-0.8),...top);
       band.back.push(...top, top[0],0,top[2]);
       band.fence.push(...top, top[0],top[1]+env*HALFPIPE.FENCE,top[2]);
-      if(j<wall.count){ const a=j*2; bidx.push(a,a+2,a+1, a+1,a+2,a+3); }
+      band.rail.push(top[0],top[1]+env*(HALFPIPE.FENCE-0.3),top[2], top[0],top[1]+env*HALFPIPE.FENCE,top[2]);
+      band.wash.push(...at(reach-6*env),...top); uv.wash.push(0,0, 0.5,0);                    // strongest at the fence, gone 6 units down the bank
+      const out=Math.min(wall.road+2.5,reach);                                                // (the bank is narrower than the glow at its very ends)
+      band.footGlow.push(...at(wall.road-3),...at(out)); uv.footGlow.push(0,0, 0.5+(out-wall.road)/5,0);
+      if(j<wall.count){ const a=j*2, quad=[a,a+2,a+1, a+1,a+2,a+3]; bidx.push(...quad); fidx[curbColour((wall.start+j)%N,wall.side)].push(...quad); }
       if(j%4===0&&env>0) posts.push([top,env]);
     }
-    const build=(v,ix,mat,lift)=>{ const g=new THREE.BufferGeometry();
+    const build=(v,ix,mat,lift,fade)=>{ const g=new THREE.BufferGeometry();
       g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(v),3)); g.setIndex(ix); g.computeVertexNormals();
+      if(fade) g.setAttribute('uv',new THREE.BufferAttribute(new Float32Array(fade),2));
       const m=new THREE.Mesh(g,mat); m.position.y=lift; m.receiveShadow=true; scene.add(m); };
     const lam=(color,extra)=>new THREE.MeshLambertMaterial(Object.assign({color,side:THREE.DoubleSide},extra||{}));
     const bankMat=lam(THEME.ROAD); roadMats.push(bankMat);
     build(pos,idx,bankMat,0);                                       // the bank itself, same colour as the road
-    build(band.foot,bidx,lam(0xe8e8e8),0.04);                       // white line along where the road's edge would be
-    build(band.lip,bidx,lam(0x2b2f36),0.04);                        // dark lip along the top
+    fidx.forEach((ix,c)=>build(band.foot,ix,curbMat[c],0.04));      // glowing line along where the road's edge would be, in the curb colours
+    fidx.forEach((ix,c)=>build(band.footGlow,ix,curbHalo[c],0.02,uv.footGlow));   // ...and its glow on the bank and the road
+    build(band.lip,bidx,curbMat[0],0.05);                           // glowing lip along the top
+    build(band.wash,bidx,curbHalo[1],0.02,uv.wash);                 // light from the fence spilling down the bank
     build(band.back,bidx,lam(0x5c636e),0);                          // back face
-    build(band.fence,bidx,lam(0xff6fae,{transparent:true,opacity:0.45}),0);   // pink mesh fence
-    const postGeo=new THREE.BoxGeometry(0.5,1,0.5), postMat=new THREE.MeshLambertMaterial({color:0xff4f9a});
+    build(band.fence,bidx,fenceMat,0);                              // see-through neon fence
+    build(band.rail,bidx,curbMat[1],0);                             // glowing rail along the top of the fence
+    const postGeo=new THREE.BoxGeometry(0.5,1,0.5), postMat=curbMat[1];
     for(const [t,env] of posts){ const h=env*HALFPIPE.FENCE; if(h<0.3) continue;
       const m=new THREE.Mesh(postGeo,postMat); m.scale.y=h; m.position.set(t[0],t[1]+h/2,t[2]); m.castShadow=true; scene.add(m); }
   }
@@ -459,22 +519,34 @@
   }
   function groundY(p,near){ const g=groundAt(p,near); return g?g.y:0; }   // just the height
 
-  // Curbs: red/white blocks along both edges (instanced so it's one draw call per color)
+  // Curbs: glowing blocks along both edges, two of one colour then two of the other (instanced so it's one draw
+  // call per colour). Each block also gets a strip of its colour on the ground beside it: that's its glow.
   { const geo=new THREE.BoxGeometry(2.4,0.3,0.9), hw=TRACK.width/2+0.5;
-    const red=new THREE.InstancedMesh(geo,new THREE.MeshLambertMaterial({color:0xd63b2f}),N);
-    const white=new THREE.InstancedMesh(geo,new THREE.MeshLambertMaterial({color:0xe8e8e8}),N);
+    const blocks=curbMat.map(mat=>new THREE.InstancedMesh(geo,mat,N*2)), used=[0,0], glow=[paint(),paint()];
     const m=new THREE.Matrix4(), q=new THREE.Quaternion(), sc=new THREE.Vector3(1,1,1), up=new THREE.Vector3(0,1,0);
-    let ri=0, wi=0;
+    // the spot halfway between road point i-1 and road point i (a block sits on point i, so it reaches from between(i) to between(i+1))
+    const between=i=>{ const a=samples[(i-1+N)%N], b=samples[i%N]; return {p:a.p.clone().add(b.p).multiplyScalar(0.5),n:a.n.clone().add(b.n).normalize()}; };
     samples.forEach((s,i)=>{
       q.setFromAxisAngle(up,-Math.atan2(s.t.z,s.t.x));
       for(const side of [1,-1]){
         if(wallAt[i]&&wallAt[i].side===side) continue;   // the bank starts here, no curb
         const p=s.p.clone().addScaledVector(s.n,side*hw); p.y=0.15;
         m.compose(p,q,sc);
-        if((i+(side>0?0:1))%2) white.setMatrixAt(wi++,m); else red.setMatrixAt(ri++,m);
+        const c=curbColour(i,side); blocks[c].setMatrixAt(used[c]++,m);
+        glow[c].piece(between(i),between(i+1),side*hw,2.5);
       }
     });
-    red.count=ri; white.count=wi; scene.add(red,white); }
+    blocks.forEach((b,c)=>{ b.count=used[c]; scene.add(b); glow[c].mesh(curbHalo[c],0.045); }); }
+
+  // Middle line: glowing dashes down the middle of the road. Each dash is one road point long, then a gap of two.
+  // No dashes where something else is painted over the middle (a speed pad, mud, a ramp) or on the start line.
+  { const dash=paint(), glow=paint();
+    const covered=i=>{ const z=zoneAt[i], r=rampAt[i]; return (z&&Math.abs(z.center)<z.width/2)||(r&&Math.abs(r.center)<r.width/2); };
+    for(let i=3;i<N-1;i+=3){
+      if(covered(i)||covered(i+1)) continue;
+      dash.piece(samples[i],samples[i+1],0,0.2); glow.piece(samples[i],samples[i+1],0,1.3);
+    }
+    dash.mesh(lineMat,0.05); glow.mesh(lineHalo,0.045); }
 
   // Start/finish line: checkered squares across the road at sample 0
   { const s=samples[0], hw=TRACK.width/2, cell=2, cols=Math.floor(TRACK.width/cell);
@@ -879,6 +951,10 @@
     hemi.color.set(THEME.AMBIENT_SKY); hemi.groundColor.set(THEME.AMBIENT_GROUND); hemi.intensity=THEME.AMBIENT_POWER;
     sun.color.set(THEME.MOON); sun.intensity=THEME.MOON_POWER; sun.castShadow=!!THEME.SHADOWS;
     tailMat.color.set(THEME.TAIL); lampMat.color.set(THEME.HEADLIGHT);
+    curbMat[0].color.set(THEME.CURB_A); curbMat[1].color.set(THEME.CURB_B); fenceMat.color.set(THEME.CURB_B); lineMat.color.set(THEME.LINE);
+    curbHalo[0].color.set(THEME.CURB_A); curbHalo[1].color.set(THEME.CURB_B); lineHalo.color.set(THEME.LINE);
+    rampMat.color.set(THEME.RAMP); rampHalo.color.set(THEME.RAMP);
+    for(const h of [...curbHalo,lineHalo,rampHalo]){ h.opacity=THEME.GLOW_POWER; h.visible=THEME.GLOW_POWER>0; }
     for(const c of cars){   // (the beam and underglow lie on the road, so they switch off while the car is flying)
       c.beam.visible=!!THEME.HEADLIGHTS&&!c.air; c.beam.material.color.set(THEME.HEADLIGHT).multiplyScalar(THEME.HEADLIGHT_POWER);
       c.glow.visible=!!THEME.UNDERGLOW&&!c.air; c.glow.material.color.set(c.color).multiplyScalar(THEME.UNDERGLOW_POWER);
