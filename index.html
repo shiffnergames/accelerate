@@ -127,6 +127,14 @@
     walls:[
       {at:[0.45,0.62], length:130, side:1, height:12, width:20, flat:-6},   // banked turn on the outside of the big left-hand turn at the top of the inner loop (runs onto both legs so the ends are gentle)
     ],
+    // Loops: a loop-de-loop. The road squeezes in to the loop's entrance, so everybody has to take it.
+    // You drive in along the middle of the road, go up, over the top upside down, and come out one lane
+    // to the side (`side`: -1 = to the left as you drive, 1 = to the right). `radius` is how big it is
+    // (its top is twice that high) and `lane` is how wide the loop's own road is.
+    // How fast you need to be going is set in LOOP below.
+    loops:[
+      {at:[0.89,0.61], radius:16, lane:7, side:-1},   // right straight, just after the speed pad: hit the pad or you won't make it round
+    ],
     // Deer: a herd of deer waits beside the road at `at`. When a car gets within `warn` units of them
     // (coming round the corner), they all run across. `herd` is how many deer, `side` is where they wait
     // first (1 = right as you drive, -1 = left). A bigger `warn` means they're further across by the time you get there.
@@ -215,6 +223,16 @@
     FENCE:3.5,      // how tall the fence along the top is (just for looks, the top edge is what stops you)
     CAM_GAP:2,      // the camera stays this far on the driver's side of the fence, so it never ends up behind the bank
     CAM_LIFT:0.8,   // when the fence squeezes the camera in close to the car, it rises to look down over it (0 = stays low)
+  };
+
+  // ===================== LOOP-DE-LOOP =====================
+  const LOOP={
+    NEED:90,        // how fast you must be going when you drive onto the loop to make it all the way round. Top speed is 70, so you need the speed pad (it gets you to about 110)
+    SLOW:0.55,      // how much of your speed you still have at the very top (0.55 = 55%). You get it all back on the way down
+    STEER:8,        // how fast the steering keys slide you sideways across the loop's road
+    TAPER:30,       // units of road before the loop where the road squeezes in to the entrance (and widens again after it)
+    WING:25,        // how far the fences reach out sideways where the squeeze starts, so nobody can sneak round the loop over the ground
+    BOUNCE:0.3,     // how much a car bounces off the fences beside the loop (0 = it just stops, 1 = full bounce)
   };
 
   // ===================== DEER =====================
@@ -516,6 +534,80 @@
     for(const [t,env] of posts){ const h=env*HALFPIPE.FENCE; if(h<0.3) continue;
       const m=new THREE.Mesh(postGeo,postMat); m.scale.y=h; m.position.set(t[0],t[1]+h/2,t[2]); m.castShadow=true; scene.add(m); }
   }
+  // Loops (loop-de-loops). A loop is a circle standing up on the road. A car on it isn't driven like a car on the
+  // ground: it rides the loop like a train on a rail, and all the game keeps track of is phi (how far round it is)
+  // and w (how far to the right of the middle of the loop's road it is). loopSpot() turns those into a real place.
+  // On the way round, the loop's road slides sideways by one lane, so you come out beside where you went in.
+  const loopList=[], TAU=Math.PI*2, UP=new THREE.Vector3(0,1,0);
+  const fences=[];   // every solid stretch of fence: it runs from (ax, az) to (bx, bz)
+  // phi: 0 = the bottom, going in. TAU/2 (half a turn) = the top. TAU = the bottom again, coming out.
+  // Gives back pos (the spot), fwd (the way a car there points) and up (the way its roof points: toward the middle
+  // of the loop). Before 0 and after TAU it carries on along the flat road, so the camera can use it there too.
+  function loopSpot(L,phi,w){
+    const s=Math.max(0,Math.min(1,phi/TAU)), lat=L.out*s*s*(3-2*s)+w;   // lat = how far right of the middle of the road
+    let along, high=0, fa=1, fu=0;   // how far past the loop's bottom, how high, and which way is forward (fa = along the road, fu = straight up)
+    if(phi<=0) along=L.r*phi;
+    else if(phi>=TAU) along=L.r*(phi-TAU);
+    else { along=L.r*Math.sin(phi); high=L.r*(1-Math.cos(phi)); fa=Math.cos(phi); fu=Math.sin(phi); }
+    return { pos:new THREE.Vector3(L.p.x+L.t.x*along+L.n.x*lat,0.04+high,L.p.z+L.t.z*along+L.n.z*lat),
+             fwd:new THREE.Vector3(L.t.x*fa,fu,L.t.z*fa), up:new THREE.Vector3(-L.t.x*fu,fa,-L.t.z*fu) };
+  }
+  for(const l of TRACK.loops||[]){
+    const i=nearest((l.at[0]-0.5)*PAGE_W,(l.at[1]-0.5)*PAGE_H).i, at=samples[i], side=l.side??-1, lane=l.lane??7;
+    // p = the bottom of the loop, t = the way the road runs there, n = to the right. out = where you come out (a lane to one side)
+    // (the way out is a lane and a bit to the side: the bit is room for the fence between the way in and the way out)
+    const L={i,p:at.p,t:at.t,n:at.n,r:l.radius??16,lane,side,out:side*(lane+1.2)}; loopList.push(L);
+    // Squeeze the road in to the loop's entrance. On the side you come out, it opens again at the bottom of the
+    // loop to make room for the way out. After the loop both sides go back to the full road.
+    const hw=TRACK.width/2, wide=Math.abs(L.out)+lane/2+0.5, ease=x=>{ x=Math.max(0,Math.min(1,x)); return x*x*(3-2*x); };
+    const before=Math.ceil((LOOP.TAPER+2)/spacing), after=Math.ceil((L.r+4+LOOP.TAPER)/spacing), row=k=>(i+k+N)%N;   // how many road points the squeeze covers before and after the loop's bottom
+    for(let k=-before;k<=after;k++){
+      const j=row(k), d=k*spacing;                                       // d = how far past the bottom of the loop this road point is
+      const squeeze=ease((d+2+LOOP.TAPER)/LOOP.TAPER), back=ease((d-L.r-4)/LOOP.TAPER);   // squeeze: 0 to 1 on the way in. back: 0 until you're past the loop, then up to 1
+      const inn=hw+(lane/2+0.5-hw)*squeeze, mid=hw+(lane/2+0.1-hw)*squeeze;   // the far side's edge, and the edge between the way in and the way out
+      const exit=d>0?mid+(wide-mid)*ease(d/2.5):mid;                     // on the way-out side the road jumps open at the loop's bottom
+      roadSide[-side][j]=inn+(hw-inn)*back; roadSide[side][j]=exit+(hw-exit)*back;
+    }
+    // Fences. Without them a car could drive round the loop over the ground, or into the side of it. They stand
+    // on the curb line down both sides of the squeezed road, they reach out sideways where the squeeze starts
+    // (the wings), and one runs round the outside of the way out. They are solid: step() keeps cars out of them.
+    const edge=(k,to,off)=>{ const q=samples[row(k)]; return [q.p.x+q.n.x*to*off,q.p.z+q.n.z*to*off]; };   // a spot beside road point k: `off` out to the `to` side
+    const curb=(k,to)=>edge(k,to,roadSide[to][row(k)]+0.5), runs=[[],[],[]];
+    runs[0].push(edge(-before,-side,hw+0.5+LOOP.WING)); runs[1].push(edge(-before,side,hw+0.5+LOOP.WING));   // the two wings
+    for(let k=-before;k<=after;k++) runs[0].push(curb(k,-side));                          // the far side, all the way through
+    for(let k=-before;k<=0;k++) runs[1].push(curb(k,side));                               // between the way in and the way out, up to the loop's bottom
+    for(let k=-Math.ceil((L.r+2)/spacing);k<=after;k++) runs[2].push(k<2?edge(k,side,wide+0.5):curb(k,side));   // round the outside of the way out
+    { const v=[], top=[], ix=[], H=HALFPIPE.FENCE, post=new THREE.BoxGeometry(0.4,H,0.4);
+      for(const run of runs) run.forEach(([x,z],n)=>{
+        const a=v.length/3; v.push(x,0,z, x,H,z); top.push(x,H-0.3,z, x,H,z);
+        if(n<run.length-1){ ix.push(a,a+2,a+1, a+1,a+2,a+3); const [bx,bz]=run[n+1]; fences.push({ax:x,az:z,bx,bz}); }
+        if(n%3===0||n===run.length-1){ const m=new THREE.Mesh(post,curbMat[1]); m.position.set(x,H/2,z); scene.add(m); }
+      });
+      for(const [pts,mat] of [[v,fenceMat],[top,curbMat[1]]]){   // the see-through fence, and the glowing rail along its top
+        const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(pts),3)); g.setIndex(ix);
+        scene.add(new THREE.Mesh(g,mat));
+      } }
+    // Draw it: the loop's road, a glowing rail down each edge (on the inside and the outside of the loop, so it
+    // shows from everywhere), the light the rails spill onto the road, and dashes down the middle.
+    const SEG=72, quad=k=>[k*2,k*2+2,k*2+1, k*2+1,k*2+2,k*2+3], all=[], colour=[[],[]], dashes=[];
+    for(let k=0;k<SEG;k++){ all.push(...quad(k)); colour[Math.floor(k/3)%2].push(...quad(k)); if(k%3===1) dashes.push(...quad(k)); }
+    // a strip that goes all the way round, from w0 to w1 across the loop's road, lifted `lift` off it (toward the middle of the loop)
+    const strip=(w0,w1,lift,ix,mat,fade)=>{
+      const v=[], uv=[];
+      for(let k=0;k<=SEG;k++) for(const [w,u] of [[w0,fade?0.5:0],[w1,fade?0:1]]){ const q=loopSpot(L,TAU*k/SEG,w); q.pos.addScaledVector(q.up,lift); v.push(q.pos.x,q.pos.y,q.pos.z); uv.push(u,0); }
+      const g=new THREE.BufferGeometry();
+      g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(v),3)); g.setAttribute('uv',new THREE.BufferAttribute(new Float32Array(uv),2)); g.setIndex(ix); g.computeVertexNormals();
+      const m=new THREE.Mesh(g,mat); scene.add(m); return m;
+    };
+    const loopMat=new THREE.MeshLambertMaterial({color:THEME.ROAD,side:THREE.DoubleSide}); roadMats.push(loopMat);
+    const road=strip(-lane/2,lane/2,0,all,loopMat); road.castShadow=true; road.receiveShadow=true;
+    for(const e of [-1,1]) colour.forEach((ix,c)=>{
+      const mat=(c+(e>0?1:0))%2;   // (the two edges are one step out of line, like the curbs)
+      for(const lift of [0.06,-0.06]) strip(e*lane/2,e*(lane/2-0.5),lift,ix,curbMat[mat]);
+      strip(e*(lane/2-0.5),e*(lane/2-2.7),0.04,ix,curbHalo[mat],true);
+    });
+    strip(-0.2,0.2,0.05,dashes,lineMat);
+  }
   // Now the banks are in, pull the drawn road's edges in to match roadSide (the road was drawn full width all the way round)
   { const at=roadMesh.geometry.attributes.position;
     for(let r=0;r<=N;r++){ const i=r%N, s=samples[i];
@@ -610,6 +702,7 @@
     samples.forEach((s,i)=>{
       for(const side of [1,-1]){
         if(wallAt[i]&&wallAt[i].side===side) continue;   // the bank starts here, no curb
+        if(Math.abs(out(i+1,side)-out(i-1,side))>3) continue;   // the road's edge jumps sideways here (the way out of a loop): no curb across the gap
         const p=spot(i,side), along=spot(i+1,side).sub(spot(i-1,side)); p.y=0.15;
         q.setFromAxisAngle(up,-Math.atan2(along.z,along.x));   // each block points along the edge it sits on
         m.compose(p,q,sc);
@@ -1024,6 +1117,7 @@
       // Cars start just behind the line, in the last checkpoint. Crossing the line makes it lap 1.
       c.vx=0; c.vz=0; c.speed=0; c.spin=0; c.lap=0; c.cp=CPS-1; c.warn=''; c.time=0; c.done=false; c.finishTime=0;
       c.zone=null; c.effect=null; c.effectTime=0; c.kick=0; c.vy=0; c.air=false; c.deerMsg=0;
+      c.loop=null; c.loopOut=null; c.loopSkip=null; c.loopMsg=0; c.tumble=false; c.cam.up.set(0,1,0);
       c.mesh.rotation.y=-c.a+Math.PI/2; c.mesh.rotation.x=0; c.mesh.rotation.z=0;
       updateCam(c,true);
     }
@@ -1047,9 +1141,12 @@
       if(c.done) continue;
       c.time+=dt;
       const p=c.mesh.position, k=c.keys;
+      // On a loop-de-loop the loop does the driving. (For lap counting the car is at the loop's own bit of road the
+      // whole way round: over the top it is really moving backwards, and that mustn't count as going the wrong way.)
+      if(c.loop){ const at={i:c.loop.L.i,d:0}; rideLoop(c,dt); finishStep(c,at,true,dt); continue; }
       // (Riding a ramp or the half-pipe wall counts as road, even though it's beside the flat part.)
       const near=locate(p.x,p.z), gnd=groundAt(p,near), mid=samples[near.i], right=(p.x-mid.p.x)*mid.n.x+(p.z-mid.p.z)*mid.n.z;   // right = how far right of the middle of the road
-      const road=!!gnd||(near.d<=onRoadDist&&right>=-roadSide[-1][near.i]-0.5&&right<=roadSide[1][near.i]+0.5);   // (the road can be narrower on one side: see roadSide)
+      const road=!!gnd||(right>=-roadSide[-1][near.i]-0.5&&right<=roadSide[1][near.i]+0.5&&near.d<=Math.max(roadSide[-1][near.i],roadSide[1][near.i],TRACK.width/2)+0.5);   // (the road can be narrower or wider on one side: see roadSide)
       // Zones: driving onto a zone starts its effect (and its kick). The effect keeps going for
       // `time` seconds after you leave the patch, which is how a speed pad boost outlasts the pad.
       // (A flying car is over the zone, not on it, so mud can't grab you mid-air.)
@@ -1074,7 +1171,7 @@
       }
       // Drag slowly eats forward speed; grip eats the sideways slide (this is the slippery part)
       vf*=Math.pow(drag,dt);
-      vs*=Math.pow(1-DRIVE.GRIP,dt);
+      if(!c.tumble) vs*=Math.pow(1-DRIVE.GRIP,dt);   // (a car falling off a loop keeps its sideways shove until it lands)
       // On a bank (the half pipe) gravity pulls you down the slope: back toward the road if you're
       // riding along it, and it slows you if you charge straight up it
       if(gnd&&gnd.slope&&!c.air){
@@ -1105,6 +1202,33 @@
         if(sideWall){ const s=Math.sign(wasOutX?px0-b.x:dx)||1; p.x=b.x+s*hx; if(c.vx*s<0) c.vx*=-CITY.BOUNCE; }
         else        { const s=Math.sign(wasOutZ?pz0-b.z:dz)||1; p.z=b.z+s*hz; if(c.vz*s<0) c.vz*=-CITY.BOUNCE; }
       }
+      // Fences are solid as well. A fence is a thin line, so there are two checks: did this move carry the car
+      // across it (a fast car can jump right over a thin line in one step), or has it ended up closer than 1.2
+      // (the car's half width)? Either way it goes back on the side it came from, and bounces a little.
+      if(p.y<HALFPIPE.FENCE) for(const f of fences){
+        const ex=f.bx-f.ax, ez=f.bz-f.az, len=Math.hypot(ex,ez), nx=ez/len, nz=-ex/len;        // (nx, nz) = straight out from one face of the fence
+        const was=(px0-f.ax)*nx+(pz0-f.az)*nz, is=(p.x-f.ax)*nx+(p.z-f.az)*nz, keep=1.2*(Math.sign(was)||1);   // how far out from the fence's line the car was, and is now
+        let along=((p.x-f.ax)*ex+(p.z-f.az)*ez)/(len*len);                                     // where along the fence the car is: 0 = one end, 1 = the other
+        if(was*is<0){ const cut=was/(was-is); along=((px0+(p.x-px0)*cut-f.ax)*ex+(pz0+(p.z-pz0)*cut-f.az)*ez)/(len*len); }   // crossed its line: where?
+        else if(Math.abs(is)>=1.2) continue;
+        if(along<0||along>1) continue;                                                          // past the end of this stretch (the next stretch along will catch it)
+        p.x+=(keep-is)*nx; p.z+=(keep-is)*nz;
+        const into=c.vx*nx+c.vz*nz; if(into*keep<0){ c.vx-=(1+LOOP.BOUNCE)*into*nx; c.vz-=(1+LOOP.BOUNCE)*into*nz; }
+      }
+      // Loops: drive forward over the bottom of a loop, between its fences, and it picks you up
+      let caught=false;
+      for(const L of loopList){
+        const was=(px0-L.p.x)*L.t.x+(pz0-L.p.z)*L.t.z, is=(p.x-L.p.x)*L.t.x+(p.z-L.p.z)*L.t.z;   // how far past the loop's bottom the car was, and is now
+        const lat=(p.x-L.p.x)*L.n.x+(p.z-L.p.z)*L.n.z, fast=c.vx*L.t.x+c.vz*L.t.z;               // how far right of the middle, and how fast it's heading into the loop
+        if(c.loopSkip===L){ if(is>L.r+6||is<-6) c.loopSkip=null; continue; }                      // this car just fell off this loop: it has to drive clear before the loop picks it up again
+        if(c.air||was>=0||is<0||is>10||Math.abs(lat)>L.lane/2+1.5||fast<=0.5) continue;
+        // Fast enough? Then it goes all the way round. If not, it runs out of speed part of the way up:
+        // top = how high it gets, phiTop = how far round that is.
+        const share=Math.min(1,(fast/LOOP.NEED)**2), room=L.lane/2-1.3;
+        c.loop={L,phi:is/L.r,w:Math.max(-room,Math.min(room,lat)),v0:fast,ok:fast>=LOOP.NEED,dir:1,top:2*L.r*share,phiTop:Math.acos(1-2*share)};
+        c.a=Math.atan2(L.t.z,L.t.x); c.vy=0; c.loopOut=null; rideLoop(c,0); caught=true; break;
+      }
+      if(caught){ finishStep(c,{i:c.loop.L.i,d:0},true,dt); continue; }
       // Up and down. On the ground the car follows the ground (a ramp lifts it). When the ground
       // drops away under it (the lip of a ramp) it keeps the upward speed the ramp gave it and flies
       // until gravity brings it back down to whatever is underneath.
@@ -1135,7 +1259,7 @@
       if(hitFence&&c.vy>0) c.vy*=HALFPIPE.POP;             // the fence takes some of the hop out of you
       if(c.air){
         c.vy-=JUMP.GRAVITY*dt; p.y+=c.vy*dt;
-        if(p.y<=g){ p.y=g; c.vy=0; c.air=false; }          // touchdown
+        if(p.y<=g){ p.y=g; c.vy=0; c.air=false; c.tumble=false; }   // touchdown
       }
       c.mesh.rotation.y=-c.a+Math.PI/2;
       // Tip the nose to match: up going up, down coming down (eased so landings don't snap)
@@ -1151,19 +1275,19 @@
       }
       c.mesh.rotation.x+=(pitch-c.mesh.rotation.x)*ease;
       c.mesh.rotation.z+=(roll-c.mesh.rotation.z)*ease;
-      // Lap counting: the lap is split into CPS checkpoints that must be passed in order,
-      // and a checkpoint only counts if you're on the road, just beside it, or up on a bank (no cutting across the grass).
-      const s=Math.floor(now.i*CPS/N), ahead=(s-c.cp+CPS)%CPS;   // how many checkpoints past the last one you earned
-      if(ahead===1&&(now.d<=TRACK.width||under)){ c.cp=s; if(s===0){ c.lap++; if(c.lap>LAPS){ c.done=true; c.finishTime=c.time; c.lap=LAPS; carFinished(c); } } }
-      c.warn=ahead<=1?'':ahead<=CPS/2?'GO BACK TO THE TRACK':'WRONG WAY';
-      if(c.deerMsg>0){ c.deerMsg-=dt; if(!c.warn) c.warn='OH DEER!'; }   // just bumped the deer
-      updateCam(c,false,dt);
+      finishStep(c,now,!!under,dt);
     }
     updateDeer(dt);
     // Car-vs-car ricochet: like two billiard balls of the same weight
     const [A,B]=cars, a=A.mesh.position, b=B.mesh.position;
+    // Two cars on the same loop can't bounce (they're on rails), so the one behind just can't get past: it waits
+    // behind the one in front unless it is far enough to one side to squeeze by.
+    if(A.loop&&B.loop&&A.loop.L===B.loop.L){
+      const [front,rear]=A.loop.phi>=B.loop.phi?[A,B]:[B,A], gap=3.4/rear.loop.L.r;
+      if(rear.loop.dir>0&&front.loop.phi-rear.loop.phi<gap&&Math.abs(front.loop.w-rear.loop.w)<2.2){ rear.loop.phi=Math.max(0,front.loop.phi-gap); placeOnLoop(rear); }
+    }
     const dx=b.x-a.x, dz=b.z-a.z, d=Math.hypot(dx,dz);
-    if(d<3.2&&d>0&&Math.abs(a.y-b.y)<1.5){   // (a car flying overhead doesn't hit the one below)
+    if(!A.loop&&!B.loop&&d<3.2&&d>0&&Math.abs(a.y-b.y)<1.5){   // (a car flying overhead doesn't hit the one below, and a car on a loop is out of reach)
       const nx=dx/d, nz=dz/d;                              // line from A to B
       const push=(3.2-d)/2;                                // un-overlap them
       a.x-=nx*push; a.z-=nz*push; b.x+=nx*push; b.z+=nz*push;
@@ -1181,7 +1305,73 @@
       }
     }
   }
+  // The end of every car's turn in step(): count laps, set the warning badge, move the camera.
+  // onTrack = true when the car is up on something (a bank, a ramp, a loop), which counts as being on the track.
+  function finishStep(c,now,onTrack,dt){
+    // Lap counting: the lap is split into CPS checkpoints that must be passed in order,
+    // and a checkpoint only counts if you're on the road, just beside it, or up on a bank (no cutting across the grass).
+    const s=Math.floor(now.i*CPS/N), ahead=(s-c.cp+CPS)%CPS;   // how many checkpoints past the last one you earned
+    if(ahead===1&&(now.d<=TRACK.width||onTrack)){ c.cp=s; if(s===0){ c.lap++; if(c.lap>LAPS){ c.done=true; c.finishTime=c.time; c.lap=LAPS; carFinished(c); } } }
+    c.warn=ahead<=1?'':ahead<=CPS/2?'GO BACK TO THE TRACK':'WRONG WAY';
+    if(c.deerMsg>0){ c.deerMsg-=dt; if(!c.warn) c.warn='OH DEER!'; }   // just bumped the deer
+    if(c.loopMsg>0){ c.loopMsg-=dt; if(!c.warn) c.warn='TOO SLOW! HIT THE SPEED PAD'; }   // just fell off the loop
+    updateCam(c,false,dt);
+  }
+  // Put a car where its loop says it is, pointing the way the loop points there (-phi tips the nose up, all the way over)
+  function placeOnLoop(c){
+    const at=loopSpot(c.loop.L,c.loop.phi,c.loop.w);
+    c.mesh.position.copy(at.pos); c.mesh.rotation.set(-c.loop.phi,-c.a+Math.PI/2,0);
+  }
+  // One step for a car on a loop. Its speed isn't worked out from the gas and brake here: it depends only on how
+  // fast the car came in (v0) and how high up it is now. It slows down going up and gets it all back coming down.
+  function rideLoop(c,dt){
+    const R=c.loop, L=R.L, k=c.keys, p=c.mesh.position, high=L.r*(1-Math.cos(R.phi));
+    // Fast enough to make it: down to SLOW of its speed at the very top. Too slow: its speed runs out at `top` (never quite to 0, so it gets there)
+    const v=R.ok?R.v0*Math.sqrt(1-(1-LOOP.SLOW*LOOP.SLOW)*high/(2*L.r)):Math.max(6,R.v0*Math.sqrt(Math.max(0,1-high/R.top)));
+    R.phi+=R.dir*v*dt/L.r; c.speed=R.dir*v; c.air=false;
+    const room=L.lane/2-1.3;   // steering slides the car across the loop's road
+    if(keys[k.left]) R.w-=LOOP.STEER*dt;
+    if(keys[k.right]) R.w+=LOOP.STEER*dt;
+    R.w=Math.max(-room,Math.min(room,R.w));
+    if(!R.ok&&R.dir>0&&R.phi>=R.phiTop){
+      R.phi=R.phiTop;
+      if(R.phiTop<=Math.PI/2+0.1) R.dir=-1;   // not even past straight-up: it rolls back down the way it came
+      else {                                   // past straight-up and out of speed: it drops off the loop
+        // It falls like a car off a jump, with a sideways shove that lands it in the lane you come out in
+        // (straight down would put it under the loop's ramp, where its camera can't see it).
+        const at=loopSpot(L,R.phi,R.w), vy=at.fwd.y*v, drop=(vy+Math.sqrt(vy*vy+2*JUMP.GRAVITY*at.pos.y))/JUMP.GRAVITY;   // drop = how long the fall takes
+        const lat=(at.pos.x-L.p.x)*L.n.x+(at.pos.z-L.p.z)*L.n.z, shove=(L.out-lat)/drop;
+        placeOnLoop(c); c.vx=at.fwd.x*v+L.n.x*shove; c.vz=at.fwd.z*v+L.n.z*shove; c.vy=vy;
+        c.air=true; c.tumble=true; c.loop=null; c.loopSkip=L; c.loopMsg=1.5; return;
+      }
+    }
+    if(R.phi>=TAU||(R.dir<0&&R.phi<=0)){   // off the end: back to ordinary driving (out the far end at the speed it came in, or backwards out of the entrance)
+      const out=R.dir>0?R.v0:-0.6*v, at=loopSpot(L,R.phi,R.w);
+      p.copy(at.pos); p.y=0; c.mesh.rotation.x=0; c.vx=L.t.x*out; c.vz=L.t.z*out; c.vy=0; c.speed=out;
+      c.loopOut=R.dir>0?{L,w:R.w}:null; if(R.dir<0) c.loopMsg=1.5;
+      c.loop=null; return;
+    }
+    placeOnLoop(c);
+  }
   function updateCam(c,snap,dt){
+    const glide=snap?1:1-Math.pow(0.0005,dt);   // how much of the gap to where the camera wants to be closes this frame
+    // Loops: the camera rides round the loop behind the car, on the same rail, and tips over with it. `ride` = where
+    // the car is on the loop. For a moment after the car comes out the camera is still on the loop, so it keeps
+    // riding until it is back on the flat too.
+    let ride=null;
+    if(c.loop) ride={L:c.loop.L,phi:c.loop.phi,w:c.loop.w};
+    else if(c.loopOut){
+      const L=c.loopOut.L, q=c.mesh.position, past=(q.x-L.p.x)*L.t.x+(q.z-L.p.z)*L.t.z, lat=(q.x-L.p.x)*L.n.x+(q.z-L.p.z)*L.n.z;
+      if(past<-1||past>=12||c.air) c.loopOut=null; else ride={L,phi:TAU+past/L.r,w:lat-L.out};
+    }
+    if(ride&&!snap){
+      const at=loopSpot(ride.L,ride.phi-12/ride.L.r,ride.w), see=loopSpot(ride.L,ride.phi+6/ride.L.r,ride.w);
+      c.cam.position.lerp(at.pos.addScaledVector(at.up,7),glide);
+      c.cam.up.lerp(at.up,glide).normalize();
+      c.cam.lookAt(see.pos.addScaledVector(see.up,1.5));
+      return;
+    }
+    c.cam.up.lerp(UP,glide).normalize();   // (after a loop, the camera rolls back to the right way up)
     const p=c.mesh.position, bx=-Math.cos(c.a)*12, bz=-Math.sin(c.a)*12;   // (bx,bz) = from the car back to the camera's usual spot
     // Banks: the camera has to stay on the driver's side of the fence, or all you'd see is the back of the bank.
     // If the usual spot is past the fence, the camera closes in on the car until it fits, and rises to look down
@@ -1298,7 +1488,7 @@
 
   // Handy for poking at the game from the browser console
   // e.g. ACCEL.DRIVE.GRIP=0.7 in the console changes the feel instantly, no reload
-  window.ACCEL={TRACK,DRIVE,THEME,ZONE_TYPES,JUMP,HALFPIPE,DEER,CITY,CARS,PLAYERS,roadSide,buildings,deer:herds,zoneAt,rampAt,wallAt,groundAt,groundY,samples,cars,keys,nearest,locate,lapLength,get state(){return state;}};
+  window.ACCEL={TRACK,DRIVE,THEME,ZONE_TYPES,JUMP,HALFPIPE,LOOP,loops:loopList,loopSpot,fences,DEER,CITY,CARS,PLAYERS,roadSide,buildings,deer:herds,zoneAt,rampAt,wallAt,groundAt,groundY,samples,cars,keys,nearest,locate,lapLength,get state(){return state;}};
 })();
 </script>
 </body>
