@@ -119,8 +119,13 @@
     // `height` is how tall the top is, `width` is how far past the road's edge the bank reaches
     // (wide and low = a gentle speedway bank, narrow and tall = a half pipe). At each end it shrinks
     // back down and in until it's just flat road again, so you drive straight onto it and straight off.
+    // `flat` is how much flat road is left beside the bank, on its low side: 10 = half the road, so you can
+    // stay off the bank if you want. 0 = none: the bank is the only road there and you have to ride it.
+    // Below 0 takes away some of the bank's own bottom too, where it's nearly flat: -6 = the road's edge is
+    // 6 units past the middle and the bank starts rising right there, so it's narrower and steeper.
+    // (The road squeezes in slowly as the bank grows, and comes back as it shrinks.)
     walls:[
-      {at:[0.45,0.62], length:130, side:1, height:12, width:20},   // banked turn on the outside of the big left-hand turn at the top of the inner loop (runs onto both legs so the ends are gentle)
+      {at:[0.45,0.62], length:130, side:1, height:12, width:20, flat:-6},   // banked turn on the outside of the big left-hand turn at the top of the inner loop (runs onto both legs so the ends are gentle)
     ],
     // Deer: a herd of deer waits beside the road at `at`. When a car gets within `warn` units of them
     // (coming round the corner), they all run across. `herd` is how many deer, `side` is where they wait
@@ -234,6 +239,37 @@
     BOUNCE:0.3,     // how much a car bounces back when it drives into a building (0 = it just stops, 1 = full bounce)
   };
 
+  // ===================== CARS =====================
+  // Every car the game knows how to build. More can be added to the list later.
+  //   name  = what the scoreboard calls it
+  //   shape = which body it gets: 'coupe' is the low sports car from design/car1.png, 'box' is the old block car
+  //   size  = how big it is drawn. The coupe is drawn 1.6 wide, so 1.25 makes it 2 wide, the same as the block car.
+  //           This is only for looks: it doesn't change how the car bumps into things
+  // The rest are its colours. They are used when the game loads, so change one here and reload to see it
+  // (except glow, which shows straight away: ACCEL.CARS[0].glow=0x19e6ff).
+  const CARS=[
+    { name:'ORANGE', shape:'coupe', size:1.25,
+      body:0xff6a00,     // the main body colour
+      top:0xff8f3d,      // faces that point up (hood, roof, rear deck): lighter
+      shade:0xc24e00,    // shaded faces: the nose and the window frames
+      dark:0x8f3a00,     // the side skirt and the wing supports
+      wing:0xc24e00,     // the wing blade
+      plate:0x19e6ff,    // the little plates on the ends of the wing
+      glass:0x0b0f2a,    // windows
+      stripeA:0x19e6ff,  // the upper stripe along the doors
+      stripeB:0xff2bd6,  // the lower stripe (thinner)
+      tire:0x151829,     // tires
+      rim:0xc9d3ff,      // the six-sided wheel rims
+      glow:0xff6a00 },   // underglow: the pool of light on the road under the car
+    { name:'GREEN', shape:'coupe', size:1.25,   // the same car in neon green
+      body:0x39ff14, top:0x7dff66, shade:0x1fa80a, dark:0x0f5c05, wing:0x0f5c05,
+      plate:0x19e6ff, glass:0x0b0f2a, stripeA:0x19e6ff, stripeB:0xff2bd6, tire:0x151829, rim:0xc9d3ff,
+      glow:0x39ff14 },
+    { name:'BLUE', shape:'box', body:0x3cc8ff, glow:0x3cc8ff },   // the old block car. Nobody drives it now, but it's here if you want it back
+  ];
+  // Who drives what: player 1 gets the first number's car, player 2 the second. 0 = the first car in CARS, 1 = the next, 2 = the one after
+  const PLAYERS=[0,1];
+
   // CPS = checkpoints per lap. You must pass them all, in order, on the road, or the lap doesn't count
   const TRACK=TRACK1, CPS=16;
   // Laps to win: the track's setting, unless the address ends in ?laps=5 (handy for quick races)
@@ -295,7 +331,11 @@
     const m=new THREE.Mesh(g,new THREE.MeshLambertMaterial({color}));
     m.position.y=y; m.receiveShadow=true; scene.add(m); return m;
   }
-  const roadMats=[ribbon(0,N,TRACK.width,THEME.ROAD,0.02).material];   // the road. (roadMats = everything painted road colour)
+  const roadMesh=ribbon(0,N,TRACK.width,THEME.ROAD,0.02), roadMats=[roadMesh.material];   // the road. (roadMats = everything painted road colour)
+  // How far the road reaches each side of its middle at every road point: roadSide[1] = to the right as you
+  // drive, roadSide[-1] = to the left. Half the road's width everywhere, except beside a bank with less `flat`.
+  // (Below 0 means the road's edge on that side has crossed the middle.)
+  const roadSide={[1]:new Float32Array(N).fill(TRACK.width/2),[-1]:new Float32Array(N).fill(TRACK.width/2)};
 
   // Neon: things that glow are painted with a colour that ignores how dark the night is. Like the car lights,
   // these are not real lamps. The "glow" a curb throws on the ground is a see-through strip of its colour lying
@@ -313,13 +353,14 @@
   const curbColour=(i,side)=>(Math.floor(i/2)+(side>0?0:1))%2;   // which of the two curb colours block i gets (0 or 1). The two edges are one step out of line
   // paint(): collects flat strips lying on the ground into one shape. piece(a,b,off,half) adds a strip that runs
   // from road point a to road point b, `off` to the right of the middle of the road and `half` wide each way.
+  // (`off` can also be a pair of numbers, [at a, at b], for a strip that slants across the road.)
   // ya and yb lift its two ends off the ground (for a strip that climbs a ramp).
   function paint(){
     const pos=[], uv=[], idx=[];
     return {
       piece(a,b,off,half,ya=0,yb=0){
-        const k=pos.length/3;
-        for(const [s,y] of [[a,ya],[b,yb]]) for(const e of [-1,1]){ pos.push(s.p.x+s.n.x*(off+e*half),y,s.p.z+s.n.z*(off+e*half)); uv.push(e<0?0:1,0); }
+        const k=pos.length/3, [oa,ob]=off.length?off:[off,off];   // (off can be a pair: one for each end of the strip)
+        for(const [s,y,o] of [[a,ya,oa],[b,yb,ob]]) for(const e of [-1,1]){ pos.push(s.p.x+s.n.x*(o+e*half),y,s.p.z+s.n.z*(o+e*half)); uv.push(e<0?0:1,0); }
         idx.push(k,k+2,k+1, k+1,k+2,k+3);
       },
       mesh(mat,y){
@@ -415,7 +456,7 @@
     rail.mesh(rampMat,0); glow.mesh(rampHalo,0.045);
   }
   // Walls (banked turns): the road curls up into a bank. wallAt[i] = the wall at sample i, or null.
-  // Across the road, u = how far up the bank you are: 0 at the foot (the middle of the road), `reach` at
+  // Across the road, u = how far up the bank you are: 0 at the foot (the middle of the road, or further out: see wallFoot), `reach` at
   // the top edge. The height is env * height * (u/reach)^2: a bowl, gentle at the bottom, steeper at the top.
   // env goes smoothly from 0 to 1 over TAPER units at each end of the wall, and it grows the bank two ways
   // at once: taller (env * height) and wider (reach goes from the road's edge out to the full width).
@@ -424,34 +465,39 @@
   const WALL_BACK=3;   // how far behind a wall's top edge still counts as "at the fence"
   function wallEnv(w,j){ const t=Math.max(0,Math.min(1,Math.min(j,w.count-j)*spacing/HALFPIPE.TAPER)); return t*t*(3-2*t); }   // j = a whole row
   function envAt(w,jf){ const j=Math.max(0,Math.min(w.count-1,Math.floor(jf))), f=jf-j; return wallEnv(w,j)*(1-f)+wallEnv(w,j+1)*f; }   // between rows, same blend the drawn bank uses
-  function wallReach(w,env){ return w.road+env*w.width; }   // foot to top edge
+  // The foot: where the bank starts rising, measured from the middle of the road. It's the middle (0), unless
+  // the bank's `flat` is below 0: then the road's edge pushes the foot further out as the bank grows.
+  function wallFoot(w,j){ return Math.max(0,(w.road-w.flat)*wallEnv(w,j)-w.road); }   // j = a whole row
+  function footAt(w,jf){ const j=Math.max(0,Math.min(w.count-1,Math.floor(jf))), f=jf-j; return wallFoot(w,j)*(1-f)+wallFoot(w,j+1)*f; }
+  function wallReach(w,env,foot){ return w.road-foot+env*w.width; }   // foot to top edge
   for(const w of TRACK.walls||[]){
     const mid=nearest((w.at[0]-0.5)*PAGE_W,(w.at[1]-0.5)*PAGE_H).i, half=Math.round(w.length/2/spacing);
-    // edge = where the foot is, measured from the middle of the road. road = from the foot out to the road's edge.
-    const wall={start:(mid-half+N)%N,count:half*2,side:w.side??-1,height:w.height,width:w.width,edge:0,road:TRACK.width/2};
+    // road = from the middle of the road out to its edge. flat = how much flat road is left on the bank's low side
+    // (never so far below 0 that there's no bank left).
+    const flat=Math.max(6-TRACK.width/2-w.width,Math.min(TRACK.width/2,w.flat??TRACK.width/2));
+    const wall={start:(mid-half+N)%N,count:half*2,side:w.side??-1,height:w.height,width:w.width,flat,road:TRACK.width/2};
     for(let j=0;j<=wall.count;j++) wallAt[(wall.start+j)%N]=wall;
     wallList.push(wall);
+    // The flat road on the bank's low side: all of it at the bank's ends, squeezing in to `flat` where the bank is full size
+    for(let j=0;j<=wall.count;j++) roadSide[-wall.side][(wall.start+j)%N]=TRACK.width/2-(TRACK.width/2-flat)*wallEnv(wall,j);
     // The bank: a grid, one row per sample along the road, K strips across, smooth-shaded, the same colour as
-    // the road so it reads as the road tipping up. Plus a glowing line in the curb colours where the flat road's
-    // edge would be, a dark lip along the top, the back face down to the ground, and a see-through fence on the top edge.
+    // the road so it reads as the road tipping up. Plus a lip along the top, the back face down to the ground,
+    // and a see-through fence on the top edge.
     // Lights on the bank: the lip along the top glows, the fence has a glowing rail along its top, and soft light
-    // spills down the bank from the fence (wash) and out from the edge line (footGlow). uv = where each strip fades.
-    const K=20, pos=[], idx=[], band={foot:[],lip:[],back:[],fence:[],rail:[],wash:[],footGlow:[]}, uv={wash:[],footGlow:[]}, bidx=[], fidx=[[],[]], posts=[];
+    // spills down the bank from the fence (wash). uv = where that strip fades.
+    const K=20, pos=[], idx=[], band={lip:[],back:[],fence:[],rail:[],wash:[]}, uv={wash:[]}, bidx=[], posts=[];
     for(let j=0;j<=wall.count;j++){
-      const s=samples[(wall.start+j)%N], env=wallEnv(wall,j), reach=wallReach(wall,env);
-      const at=u=>{ const q=s.p.clone().addScaledVector(s.n,wall.side*(wall.edge+u)); return [q.x,0.03+env*wall.height*(u/reach)**2,q.z]; };
+      const s=samples[(wall.start+j)%N], env=wallEnv(wall,j), foot=wallFoot(wall,j), reach=wallReach(wall,env,foot);
+      const at=u=>{ const q=s.p.clone().addScaledVector(s.n,wall.side*(foot+u)); return [q.x,0.03+env*wall.height*(u/reach)**2,q.z]; };
       for(let k=0;k<=K;k++) pos.push(...at(reach*k/K));
       if(j<wall.count) for(let k=0;k<K;k++){ const a=j*(K+1)+k, b=a+K+1; idx.push(a,b,a+1, a+1,b,b+1); }
       const top=at(reach);
-      band.foot.push(...at(wall.road-0.7),...at(wall.road-0.1));
       band.lip.push(...at(reach-0.8),...top);
       band.back.push(...top, top[0],0,top[2]);
       band.fence.push(...top, top[0],top[1]+env*HALFPIPE.FENCE,top[2]);
       band.rail.push(top[0],top[1]+env*(HALFPIPE.FENCE-0.3),top[2], top[0],top[1]+env*HALFPIPE.FENCE,top[2]);
       band.wash.push(...at(reach-6*env),...top); uv.wash.push(0,0, 0.5,0);                    // strongest at the fence, gone 6 units down the bank
-      const out=Math.min(wall.road+2.5,reach);                                                // (the bank is narrower than the glow at its very ends)
-      band.footGlow.push(...at(wall.road-3),...at(out)); uv.footGlow.push(0,0, 0.5+(out-wall.road)/5,0);
-      if(j<wall.count){ const a=j*2, quad=[a,a+2,a+1, a+1,a+2,a+3]; bidx.push(...quad); fidx[curbColour((wall.start+j)%N,wall.side)].push(...quad); }
+      if(j<wall.count){ const a=j*2; bidx.push(a,a+2,a+1, a+1,a+2,a+3); }
       if(j%4===0&&env>0) posts.push([top,env]);
     }
     const build=(v,ix,mat,lift,fade)=>{ const g=new THREE.BufferGeometry();
@@ -461,8 +507,6 @@
     const lam=(color,extra)=>new THREE.MeshLambertMaterial(Object.assign({color,side:THREE.DoubleSide},extra||{}));
     const bankMat=lam(THEME.ROAD); roadMats.push(bankMat);
     build(pos,idx,bankMat,0);                                       // the bank itself, same colour as the road
-    fidx.forEach((ix,c)=>build(band.foot,ix,curbMat[c],0.04));      // glowing line along where the road's edge would be, in the curb colours
-    fidx.forEach((ix,c)=>build(band.footGlow,ix,curbHalo[c],0.02,uv.footGlow));   // ...and its glow on the bank and the road
     build(band.lip,bidx,curbMat[0],0.05);                           // glowing lip along the top
     build(band.wash,bidx,curbHalo[1],0.02,uv.wash);                 // light from the fence spilling down the bank
     build(band.back,bidx,lam(0x5c636e),0);                          // back face
@@ -472,6 +516,13 @@
     for(const [t,env] of posts){ const h=env*HALFPIPE.FENCE; if(h<0.3) continue;
       const m=new THREE.Mesh(postGeo,postMat); m.scale.y=h; m.position.set(t[0],t[1]+h/2,t[2]); m.castShadow=true; scene.add(m); }
   }
+  // Now the banks are in, pull the drawn road's edges in to match roadSide (the road was drawn full width all the way round)
+  { const at=roadMesh.geometry.attributes.position;
+    for(let r=0;r<=N;r++){ const i=r%N, s=samples[i];
+      at.setXYZ(r*2,  s.p.x+s.n.x*roadSide[1][i], 0,s.p.z+s.n.z*roadSide[1][i]);
+      at.setXYZ(r*2+1,s.p.x-s.n.x*roadSide[-1][i],0,s.p.z-s.n.z*roadSide[-1][i]);
+    }
+    at.needsUpdate=true; }
 
   // Where is this spot on a wall's grid? The bank is drawn as rows fanning out from the road, one row per
   // road sample. On a tight turn the rows spread apart, so "straight out from the nearest road point" is
@@ -514,7 +565,7 @@
     let best=0, bd=Infinity;
     for(let j=0;j<=w.count;j++){ const p=samples[(w.start+j)%N].p, d=(p.x-x)*(p.x-x)+(p.z-z)*(p.z-z); if(d<bd){bd=d;best=(w.start+j)%N;} }
     const q=wallSpot(w,x,z,best); if(!q) return null;
-    q.i=best; q.d=Math.sqrt(bd); q.u=w.side*q.c-w.edge; q.env=envAt(w,q.jf); q.reach=wallReach(w,q.env);
+    q.i=best; q.d=Math.sqrt(bd); q.env=envAt(w,q.jf); q.foot=footAt(w,q.jf); q.u=w.side*q.c-q.foot; q.reach=wallReach(w,q.env,q.foot);
     return q;
   }
 
@@ -533,13 +584,13 @@
     const w=wallAt[near.i];
     const q=w&&wallSpot(w,p.x,p.z,near.i);
     if(q){
-      const u=w.side*q.c-w.edge, env=envAt(w,q.jf), reach=wallReach(w,env);                          // u = how far up the bank you are
+      const env=envAt(w,q.jf), foot=footAt(w,q.jf), u=w.side*q.c-foot, reach=wallReach(w,env,foot);   // u = how far up the bank you are
       // Past the top edge: the fence holds you (rim), but only where there's a real bank to fall off (not at the
       // faded-out ends), and only just behind the edge. Further back than that it's plain grass again.
       const past=u>reach;
       if(u>0&&(!past||(u<=reach+WALL_BACK&&env*w.height>=0.5))){
         const uu=Math.min(u,reach);
-        return {y:env*w.height*(uu/reach)**2, slope:w.side*env*2*w.height*uu/(reach*reach), rim:past, wall:w, c:q.c, nx:q.nx, nz:q.nz, top:w.side*(w.edge+reach)};
+        return {y:env*w.height*(uu/reach)**2, slope:w.side*env*2*w.height*uu/(reach*reach), rim:past, wall:w, c:q.c, nx:q.nx, nz:q.nz, top:w.side*(foot+reach)};
       }
     }
     return null;
@@ -548,19 +599,22 @@
 
   // Curbs: glowing blocks along both edges, two of one colour then two of the other (instanced so it's one draw
   // call per colour). Each block also gets a strip of its colour on the ground beside it: that's its glow.
-  { const geo=new THREE.BoxGeometry(2.4,0.3,0.9), hw=TRACK.width/2+0.5;
+  { const geo=new THREE.BoxGeometry(2.4,0.3,0.9);
     const blocks=curbMat.map(mat=>new THREE.InstancedMesh(geo,mat,N*2)), used=[0,0], glow=[paint(),paint()];
     const m=new THREE.Matrix4(), q=new THREE.Quaternion(), sc=new THREE.Vector3(1,1,1), up=new THREE.Vector3(0,1,0);
     // the spot halfway between road point i-1 and road point i (a block sits on point i, so it reaches from between(i) to between(i+1))
     const between=i=>{ const a=samples[(i-1+N)%N], b=samples[i%N]; return {p:a.p.clone().add(b.p).multiplyScalar(0.5),n:a.n.clone().add(b.n).normalize()}; };
+    // where the curb is at road point i: just past the road's edge on that side (the edge moves in beside a bank with no flat road)
+    const out=(i,side)=>side*(roadSide[side][(i+N)%N]+0.5), outBetween=(i,side)=>(out(i-1,side)+out(i,side))/2;
+    const spot=(i,side)=>{ const s=samples[(i+N)%N]; return s.p.clone().addScaledVector(s.n,out(i,side)); };
     samples.forEach((s,i)=>{
-      q.setFromAxisAngle(up,-Math.atan2(s.t.z,s.t.x));
       for(const side of [1,-1]){
         if(wallAt[i]&&wallAt[i].side===side) continue;   // the bank starts here, no curb
-        const p=s.p.clone().addScaledVector(s.n,side*hw); p.y=0.15;
+        const p=spot(i,side), along=spot(i+1,side).sub(spot(i-1,side)); p.y=0.15;
+        q.setFromAxisAngle(up,-Math.atan2(along.z,along.x));   // each block points along the edge it sits on
         m.compose(p,q,sc);
         const c=curbColour(i,side); blocks[c].setMatrixAt(used[c]++,m);
-        glow[c].piece(between(i),between(i+1),side*hw,2.5);
+        glow[c].piece(between(i),between(i+1),[outBetween(i,side),outBetween(i+1,side)],2.5);
       }
     });
     blocks.forEach((b,c)=>{ b.count=used[c]; scene.add(b); glow[c].mesh(curbHalo[c],0.045); }); }
@@ -569,8 +623,9 @@
   // No dashes where something else is painted over the middle (a speed pad, mud, a ramp) or on the start line.
   { const dash=paint(), glow=paint();
     const covered=i=>{ const z=zoneAt[i], r=rampAt[i]; return (z&&Math.abs(z.center)<z.width/2)||(r&&Math.abs(r.center)<r.width/2); };
+    const squeezed=i=>Math.min(roadSide[1][i],roadSide[-1][i])<TRACK.width/4;   // beside a bank with no flat road, this line would be at the road's edge
     for(let i=3;i<N-1;i+=3){
-      if(covered(i)||covered(i+1)) continue;
+      if(covered(i)||covered(i+1)||squeezed(i)||squeezed(i+1)) continue;
       dash.piece(samples[i],samples[i+1],0,0.2); glow.piece(samples[i],samples[i+1],0,1.3);
     }
     dash.mesh(lineMat,0.05); glow.mesh(lineHalo,0.045); }
@@ -669,10 +724,132 @@
   }
 
   // ===================== CARS =====================
-  function buildCar(color){
+  // The cars are painted, not lit (like the buildings): every flat face has its own shade baked in, so the shape
+  // shows without any lamps. shape() collects all the faces of one car into a single mesh, which is quick to draw.
+  // A corner is [x,y,z]: x = toward the car's left, y = up, z = toward the nose. A car is 4 long (z from -2 to 2).
+  //   quad(a,b,c,d,colour)             a flat face with four corners, going round it
+  //   pane(a,b,c,d,frame,glass,mu,mv)  a window: the same face with a frame round a sheet of glass (mu, mv = how thick the frame is)
+  //   add(solid,colour)                a ready-made three.js solid (a box, a cylinder). colour can be a function of which way each face points
+  const paintMat=new THREE.MeshBasicMaterial({vertexColors:true,side:THREE.DoubleSide});
+  function shape(){
+    const pos=[], col=[], k=new THREE.Color();
+    const tri=(a,b,c,colour)=>{ k.set(colour); pos.push(...a,...b,...c); for(let n=0;n<3;n++) col.push(k.r,k.g,k.b); };
+    const quad=(a,b,c,d,colour)=>{ tri(a,b,c,colour); tri(a,c,d,colour); };
+    // a spot on the face a,b,c,d: u = how far across from the a-d edge to the b-c edge, v = how far up from a-b to d-c (both 0 to 1)
+    const on=(a,b,c,d,u,v)=>[0,1,2].map(n=>a[n]*(1-u)*(1-v)+b[n]*u*(1-v)+c[n]*u*v+d[n]*(1-u)*v);
+    return { quad, on,
+      pane(a,b,c,d,frame,glass,mu,mv){
+        const ia=on(a,b,c,d,mu,mv), ib=on(a,b,c,d,1-mu,mv), ic=on(a,b,c,d,1-mu,1-mv), id=on(a,b,c,d,mu,1-mv);
+        quad(a,b,ib,ia,frame); quad(b,c,ic,ib,frame); quad(c,d,id,ic,frame); quad(d,a,ia,id,frame); quad(ia,ib,ic,id,glass);
+      },
+      add(solid,colour){
+        const g=solid.index?solid.toNonIndexed():solid, p=g.attributes.position.array;
+        for(let n=0;n<p.length;n+=9){
+          const a=[p[n],p[n+1],p[n+2]], b=[p[n+3],p[n+4],p[n+5]], c=[p[n+6],p[n+7],p[n+8]];
+          let paint=colour;
+          if(typeof colour==='function'){   // which way does this face point? (nx, ny, nz: 1 = straight left, up, forward)
+            const ux=b[0]-a[0], uy=b[1]-a[1], uz=b[2]-a[2], vx=c[0]-a[0], vy=c[1]-a[1], vz=c[2]-a[2];
+            const nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx, len=Math.hypot(nx,ny,nz)||1;
+            paint=colour(nx/len,ny/len,nz/len);
+          }
+          tri(a,b,c,paint);
+        }
+      },
+      mesh(mat){
+        const g=new THREE.BufferGeometry();
+        g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(pos),3)); g.setAttribute('color',new THREE.BufferAttribute(new Float32Array(col),3));
+        return new THREE.Mesh(g,mat||paintMat);
+      }
+    };
+  }
+  // Car lights. These are not real lamps (real ones would be slow on a Chromebook): the lamps are shapes painted
+  // with a colour that ignores the dark, and the beam and underglow are see-through shapes lying on the road that
+  // ADD their colour to whatever is under them, bright in the middle and fading to nothing at the edges.
+  const tailMat=new THREE.MeshBasicMaterial({color:THEME.TAIL,side:THREE.DoubleSide}), lampMat=new THREE.MeshBasicMaterial({color:THEME.HEADLIGHT,side:THREE.DoubleSide});
+  const glowMaterial=()=>new THREE.MeshBasicMaterial({vertexColors:true,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide,fog:false});
+
+  // The coupe: the low sports car from design/car1.png. `car` is its entry in CARS (its colours).
+  function buildCoupe(car){
+    const g=new THREE.Group(), s=shape(), C=h=>new THREE.Color(h);
+    const mix=(a,b,t)=>C(a).lerp(C(b),t), dim=(a,t)=>C(a).multiplyScalar(t);   // mix two colours, or darken one
+    // THE BODY, nose to tail, as six slices across the car. Each slice is:
+    //   [z, half the width, bottom, top of the side, half the width of the flat top, top]
+    // Between the side and the flat top there's a sloping face (the shoulder), so the body isn't just a box.
+    const S=[[ 2.00,0.62,0.30,0.40,0.50,0.44],    // the tip of the nose
+             [ 1.80,0.76,0.20,0.51,0.58,0.58],    // front of the hood
+             [ 0.65,0.80,0.20,0.66,0.62,0.76],    // back of the hood, where the windshield starts
+             [-0.75,0.80,0.20,0.67,0.62,0.77],    // behind the doors
+             [-1.85,0.78,0.20,0.69,0.62,0.80],    // back of the rear deck
+             [-2.00,0.74,0.24,0.60,0.60,0.64]];   // the tail
+    // the paint for each stretch between two slices: nose, front fender and hood, doors, rear quarter and deck, tail
+    const sides=[car.shade, car.body, mix(car.body,car.top,0.15), dim(car.body,0.94), dim(car.body,0.85)];
+    const shoulders=[car.shade, car.top, car.top, car.top, mix(car.top,car.body,0.5)];
+    const tops=[mix(car.body,car.shade,0.5), mix(car.top,0xffffff,0.12), car.top, mix(car.top,0xffffff,0.12), car.top];
+    for(let i=0;i<S.length-1;i++){
+      const [za,wa,ba,sa,ta,ya]=S[i], [zb,wb,bb,sb,tb,yb]=S[i+1];
+      for(const e of [1,-1]){   // left side, then right side
+        s.quad([e*wa,ba,za],[e*wb,bb,zb],[e*wb,sb,zb],[e*wa,sa,za],sides[i]);
+        s.quad([e*wa,sa,za],[e*wb,sb,zb],[e*tb,yb,zb],[e*ta,ya,za],shoulders[i]);
+      }
+      s.quad([ta,ya,za],[tb,yb,zb],[-tb,yb,zb],[-ta,ya,za],tops[i]);
+      s.quad([wa,ba,za],[wb,bb,zb],[-wb,bb,zb],[-wa,ba,za],dim(car.dark,0.5));   // underneath
+    }
+    for(const [n,low,high] of [[0,car.shade,car.shade],[S.length-1,car.body,car.top]]){   // the flat ends: the front of the nose, then the back of the tail
+      const [z,w,b,sh,t,y]=S[n];
+      s.quad([w,b,z],[-w,b,z],[-w,sh,z],[w,sh,z],low); s.quad([w,sh,z],[-w,sh,z],[-t,y,z],[t,y,z],high);
+    }
+    // Dark side skirt along the bottom, between the wheels
+    s.add(new THREE.BoxGeometry(1.66,0.1,1.62).translate(0,0.17,-0.05),car.dark);
+    // THE CABIN: windshield, two windows a side, roof, and the long sloping rear window (a fastback).
+    // It is narrower at the roof than at the bottom. B = bottom corners, T = roof corners: front, middle (the door pillar), rear.
+    const B=e=>[[e*0.62,0.74,0.65],[e*0.62,0.747,-0.30],[e*0.62,0.766,-1.34]], T=e=>[[e*0.50,1.07,0.10],[e*0.50,1.081,-0.30],[e*0.50,1.09,-0.62]];
+    const L=[B(1),T(1)], R=[B(-1),T(-1)], shine=0x2f4380;
+    s.pane(L[0][0],R[0][0],R[1][0],L[1][0],car.shade,car.glass,0.07,0.1);                       // windshield
+    s.quad(L[1][0],R[1][0],R[1][2],L[1][2],mix(car.top,0xffffff,0.12));                         // roof
+    s.pane(L[1][2],R[1][2],R[0][2],L[0][2],car.shade,car.glass,0.1,0.12);                       // rear window
+    for(const [e,[b,t]] of [[1,L],[-1,R]]){
+      s.pane(b[0],b[1],t[1],t[0],car.shade,car.glass,0.07,0.13);                                // front side window
+      s.pane(b[1],b[2],t[2],t[1],car.shade,car.glass,0.09,0.15);                                // rear side window
+      const out=q=>[q[0]+e*0.012,q[1]+0.004,q[2]];                                              // (a hair outside the glass, so the two don't flicker)
+      s.quad(...[[0.23,0.17],[0.40,0.17],[0.30,0.84],[0.07,0.84]].map(([u,v])=>out(s.on(b[0],b[1],t[1],t[0],u,v))),shine);   // a streak of reflected light on the front side window
+    }
+    s.quad(...[[0.16,0.2],[0.32,0.2],[0.44,0.8],[0.28,0.8]].map(([u,v])=>{ const q=s.on(L[1][2],R[1][2],R[0][2],L[0][2],u,v); return [q[0],q[1]+0.012,q[2]-0.005]; }),shine);   // and one on the rear window
+    // Two stripes along the bottom of each door, between the wheels
+    for(const e of [1,-1]) for(const [low,high,colour] of [[0.335,0.395,car.stripeA],[0.27,0.305,car.stripeB]]){
+      const x=e*0.815; s.quad([x,low,0.74],[x,low,-0.84],[x,high,-0.84],[x,high,0.74],colour);
+    }
+    // THE WING: a flat blade on two short supports, with a small plate on each end
+    s.add(new THREE.BoxGeometry(1.64,0.05,0.55).rotateX(0.09).translate(0,0.99,-1.74),(nx,ny)=>ny>0.5?car.wing:dim(car.wing,0.7));
+    for(const e of [1,-1]){
+      s.add(new THREE.BoxGeometry(0.07,0.24,0.14).rotateX(-0.25).translate(e*0.42,0.88,-1.72),car.dark);
+      s.add(new THREE.BoxGeometry(0.04,0.2,0.36).translate(e*0.83,0.99,-1.8),car.plate);
+    }
+    // THE BACK: a dark panel low in the bumper, two round exhausts, and a blank plate (no number on this car)
+    s.quad([0.5,0.25,-2.012],[-0.5,0.25,-2.012],[-0.5,0.36,-2.012],[0.5,0.36,-2.012],car.glass);
+    s.quad([0.13,0.385,-2.012],[-0.13,0.385,-2.012],[-0.13,0.445,-2.012],[0.13,0.445,-2.012],0xe8ecff);
+    for(const e of [1,-1]) s.add(new THREE.CylinderGeometry(0.045,0.045,0.08,8).rotateX(Math.PI/2).translate(e*0.3,0.305,-2.03),(nx,ny,nz)=>Math.abs(nz)>0.9?0x05060f:car.rim);
+    // THE WHEELS: a dark tire, a six-sided rim, and a hub in the middle
+    for(const e of [1,-1]) for(const z of [1.13,-1.22]){
+      const round=(r,wide,n)=>new THREE.CylinderGeometry(r,r,wide,n).rotateZ(Math.PI/2).translate(e*0.78,0.3,z);
+      s.add(round(0.3,0.24,14),nx=>Math.abs(nx)>0.9?car.tire:0x05060f);
+      s.add(round(0.19,0.26,6),nx=>Math.abs(nx)>0.9?car.rim:dim(car.rim,0.6));
+      s.add(round(0.055,0.28,6),car.tire);
+    }
+    const body=s.mesh(); body.castShadow=true; g.add(body);
+    // LIGHTS: a wide red bar across the back, and a headlight wrapped round each front corner of the hood
+    const tail=new THREE.Mesh(new THREE.BoxGeometry(1.5,0.1,0.08),tailMat); tail.position.set(0,0.52,-1.985); g.add(tail);
+    const lamps=shape(), [n0,n1]=S, up=(q,e)=>[q[0]+e*0.006,q[1]+0.012,q[2]];   // (lifted a hair off the hood)
+    for(const e of [1,-1]){
+      lamps.quad(...[[e*0.2,n0[5],n0[0]],[e*n0[4],n0[5],n0[0]],[e*n1[4],n1[5],n1[0]],[e*0.28,n1[5],n1[0]]].map(q=>up(q,0)),0xffffff);            // the part on top
+      lamps.quad(...[[e*n0[1],n0[3],n0[0]],[e*n1[1],n1[3],n1[0]],[e*n1[4],n1[5],n1[0]],[e*n0[4],n0[5],n0[0]]].map(q=>up(q,e)),0xffffff);       // the part on the shoulder
+    }
+    const lamp=lamps.mesh(lampMat); lamp.geometry.deleteAttribute('color'); g.add(lamp);
+    return g;
+  }
+  // The box: the old block car, kept so there's a second shape to pick from
+  function buildBox(car){
     const g=new THREE.Group();
-    g.rotation.order='YXZ';   // turn first (y), then tip the nose up or down (x) for ramps and jumps
-    const body=new THREE.Mesh(new THREE.BoxGeometry(2,0.8,4),new THREE.MeshLambertMaterial({color}));
+    const body=new THREE.Mesh(new THREE.BoxGeometry(2,0.8,4),new THREE.MeshLambertMaterial({color:car.body}));
     body.position.y=0.7; body.castShadow=true; g.add(body);
     const cabin=new THREE.Mesh(new THREE.BoxGeometry(1.6,0.7,1.8),new THREE.MeshLambertMaterial({color:0xdff6ff}));
     cabin.position.set(0,1.4,-0.2); cabin.castShadow=true; g.add(cabin);
@@ -681,18 +858,21 @@
       const w=new THREE.Mesh(new THREE.CylinderGeometry(0.45,0.45,0.4,12),wm);
       w.rotation.z=Math.PI/2; w.position.set(x,0.45,z); g.add(w);
     }
-    scene.add(g); return g;
-  }
-  // Car lights. These are not real lamps (real ones would be slow on a Chromebook): the lamps are blocks painted
-  // with a colour that ignores the dark, and the beam and underglow are see-through shapes lying on the road that
-  // ADD their colour to whatever is under them, bright in the middle and fading to nothing at the edges.
-  const tailMat=new THREE.MeshBasicMaterial({color:THEME.TAIL}), lampMat=new THREE.MeshBasicMaterial({color:THEME.HEADLIGHT});
-  const glowMaterial=()=>new THREE.MeshBasicMaterial({vertexColors:true,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide,fog:false});
-  function buildCarLights(g){
     for(const x of [-0.6,0.6]){
       const tail=new THREE.Mesh(new THREE.BoxGeometry(0.55,0.22,0.08),tailMat); tail.position.set(x,0.85,-2.02); g.add(tail);
       const lamp=new THREE.Mesh(new THREE.BoxGeometry(0.45,0.22,0.08),lampMat); lamp.position.set(x,0.8,2.02); g.add(lamp);
     }
+    return g;
+  }
+  const SHAPES={coupe:buildCoupe,box:buildBox};
+  function buildCar(car){
+    const g=new THREE.Group();
+    g.rotation.order='YXZ';   // turn first (y), then tip the nose up or down (x) for ramps and jumps
+    const shell=(SHAPES[car.shape]||buildBox)(car); shell.scale.setScalar(car.size||1); g.add(shell);
+    scene.add(g); return g;
+  }
+  // The lights every car has, whatever its shape: the headlight beam on the road, and the underglow
+  function buildCarLights(g,size){
     // Headlight beam: a fan on the road in front of the car. Rows from the bumper outwards: [how far ahead, half width, brightness]
     const rows=[[2.1,0.9,1],[5,1.7,0.8],[10,3,0.4],[17,4.4,0]], pos=[], col=[], idx=[];
     rows.forEach(([z,hw,b],r)=>{
@@ -701,25 +881,30 @@
     });
     const bg=new THREE.BufferGeometry();
     bg.setAttribute('position',new THREE.BufferAttribute(new Float32Array(pos),3)); bg.setAttribute('color',new THREE.BufferAttribute(new Float32Array(col),3)); bg.setIndex(idx);
-    const beam=new THREE.Mesh(bg,glowMaterial()); beam.position.y=0.09; g.add(beam);
+    const beam=new THREE.Mesh(bg,glowMaterial()); beam.position.set(0,0.09,2*(size-1)); g.add(beam);   // (a bigger car has its nose further forward)
     // Underglow: an oval under the car, bright in the middle
     const gg=new THREE.CircleGeometry(1,24); gg.rotateX(-Math.PI/2);
     const gc=new Float32Array(gg.attributes.position.count*3); gc[0]=gc[1]=gc[2]=1;   // vertex 0 is the middle of the circle
     gg.setAttribute('color',new THREE.BufferAttribute(gc,3));
-    const glow=new THREE.Mesh(gg,glowMaterial()); glow.scale.set(2.6,1,3.6); glow.position.y=0.08; g.add(glow);
+    const glow=new THREE.Mesh(gg,glowMaterial()); glow.scale.set(2.6*size,1,3.6*size); glow.position.y=0.08; g.add(glow);
     return {beam,glow};
   }
-  function makeCar(color,side,keys){
-    // a = which way the car points. vx,vz = which way it is actually moving (not always the same when sliding!)
-    // vy = up/down speed, air = true while the car is off the ground
-    const mesh=buildCar(color);
-    return {mesh,color,...buildCarLights(mesh),keys,side,a:0,vx:0,vz:0,vy:0,air:false,speed:0,lap:1,cp:0,time:0,done:false,finishTime:0,
+  function makeCar(car,side,keys){
+    // car = its entry in CARS. a = which way the car points. vx,vz = which way it is actually moving (not always
+    // the same when sliding!). vy = up/down speed, air = true while the car is off the ground
+    const mesh=buildCar(car);
+    return {mesh,car,...buildCarLights(mesh,car.size||1),keys,side,a:0,vx:0,vz:0,vy:0,air:false,speed:0,lap:1,cp:0,time:0,done:false,finishTime:0,
       cam:new THREE.PerspectiveCamera(60,1,0.5,500)};
   }
   const cars=[
-    makeCar(0xff5a3c, 1,{up:'KeyW',down:'KeyS',left:'KeyA',right:'KeyD'}),
-    makeCar(0x3cc8ff,-1,{up:'ArrowUp',down:'ArrowDown',left:'ArrowLeft',right:'ArrowRight'})
+    makeCar(CARS[PLAYERS[0]], 1,{up:'KeyW',down:'KeyS',left:'KeyA',right:'KeyD'}),
+    makeCar(CARS[PLAYERS[1]],-1,{up:'ArrowUp',down:'ArrowDown',left:'ArrowLeft',right:'ArrowRight'})
   ];
+  // The scoreboard above the game: each player's name and colour come from their car
+  cars.forEach((c,i)=>{
+    document.querySelector(`.car.p${i+1} .name`).textContent=c.car.name;
+    document.documentElement.style.setProperty(`--p${i+1}`,'#'+new THREE.Color(c.car.body).getHexString());
+  });
 
   // ===================== DEER =====================
   // A deer is boxes, like the cars. It faces +z, the legs hang from the hips so they can swing.
@@ -863,7 +1048,8 @@
       c.time+=dt;
       const p=c.mesh.position, k=c.keys;
       // (Riding a ramp or the half-pipe wall counts as road, even though it's beside the flat part.)
-      const near=locate(p.x,p.z), gnd=groundAt(p,near), road=near.d<=onRoadDist||!!gnd;
+      const near=locate(p.x,p.z), gnd=groundAt(p,near), mid=samples[near.i], right=(p.x-mid.p.x)*mid.n.x+(p.z-mid.p.z)*mid.n.z;   // right = how far right of the middle of the road
+      const road=!!gnd||(near.d<=onRoadDist&&right>=-roadSide[-1][near.i]-0.5&&right<=roadSide[1][near.i]+0.5);   // (the road can be narrower on one side: see roadSide)
       // Zones: driving onto a zone starts its effect (and its kick). The effect keeps going for
       // `time` seconds after you leave the patch, which is how a speed pad boost outlasts the pad.
       // (A flying car is over the zone, not on it, so mud can't grab you mid-air.)
@@ -1049,7 +1235,7 @@
     for(const h of [...curbHalo,lineHalo,rampHalo]){ h.opacity=THEME.GLOW_POWER; h.visible=THEME.GLOW_POWER>0; }
     for(const c of cars){   // (the beam and underglow lie on the road, so they switch off while the car is flying)
       c.beam.visible=!!THEME.HEADLIGHTS&&!c.air; c.beam.material.color.set(THEME.HEADLIGHT).multiplyScalar(THEME.HEADLIGHT_POWER);
-      c.glow.visible=!!THEME.UNDERGLOW&&!c.air; c.glow.material.color.set(c.color).multiplyScalar(THEME.UNDERGLOW_POWER);
+      c.glow.visible=!!THEME.UNDERGLOW&&!c.air; c.glow.material.color.set(c.car.glow).multiplyScalar(THEME.UNDERGLOW_POWER);
     }
   }
   function render(){
@@ -1090,7 +1276,7 @@
     render(); requestAnimationFrame(loop);
   }
   const overlay=document.getElementById('overlay');
-  const carName=c=>c===cars[0]?'Red':'Blue';
+  const carName=c=>c.car.name[0]+c.car.name.slice(1).toLowerCase();   // 'ORANGE' -> 'Orange'
   function endRace(){
     state='finished';
     const [first,second]=finished;
@@ -1112,7 +1298,7 @@
 
   // Handy for poking at the game from the browser console
   // e.g. ACCEL.DRIVE.GRIP=0.7 in the console changes the feel instantly, no reload
-  window.ACCEL={TRACK,DRIVE,THEME,ZONE_TYPES,JUMP,HALFPIPE,DEER,CITY,buildings,deer:herds,zoneAt,rampAt,wallAt,groundAt,groundY,samples,cars,keys,nearest,locate,lapLength,get state(){return state;}};
+  window.ACCEL={TRACK,DRIVE,THEME,ZONE_TYPES,JUMP,HALFPIPE,DEER,CITY,CARS,PLAYERS,roadSide,buildings,deer:herds,zoneAt,rampAt,wallAt,groundAt,groundY,samples,cars,keys,nearest,locate,lapLength,get state(){return state;}};
 })();
 </script>
 </body>
