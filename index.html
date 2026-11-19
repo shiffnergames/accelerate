@@ -173,6 +173,14 @@
     LINE:0x19e6ff,           // the dashed line down the middle of the road
     RAMP:0xffd84d,           // the lights on the jump: its stripes, the rails down its edges and the bar across the lip (warm yellow)
     GLOW_POWER:0.4,          // the soft light the curbs, the middle line, the jump and the bank's fence spill onto the ground. 0 = off
+    BUILDING_A:0x1a2152,     // the city: half the buildings are this shade of navy...
+    BUILDING_B:0x141a3d,     // ...and half are this darker one
+    WINDOW_A:0xffd84d,       // lit windows: about half are warm yellow,
+    WINDOW_B:0x19e6ff,       // a quarter are cyan,
+    WINDOW_C:0xff2bd6,       // and a quarter are magenta. Most windows stay dark
+    STARS:0xffffff,          // the stars
+    GRID:0xff2bd6,           // the thin grid lines on the ground
+    GRID_POWER:0.3,          // how strong the grid lines are (0 = no grid, 1 = full colour)
   };
 
   // ===================== ZONES =====================
@@ -212,6 +220,20 @@
     GAP:10,         // how far apart the rows of the herd run. Bigger = an easier gap to slip through
   };
 
+  // ===================== CITY =====================
+  // The buildings stand in a ring around the outside of the track. These are used when the game loads,
+  // so change one here and reload to see it.
+  const CITY={
+    COUNT:70,       // how many buildings
+    BACK:30,        // the closest a building can stand to the track (so none of them ever blocks the road)
+    DEEP:110,       // how far back the city goes behind that
+    LOW:12,         // the shortest a building can be
+    TALL:60,        // the tallest a building can be (most are much shorter: tall ones are rare)
+    STARS:240,      // how many stars are in the sky
+    SEED:7,         // the same number builds the same city every time. Change it for a different city
+    BOUNCE:0.3,     // how much a car bounces back when it drives into a building (0 = it just stops, 1 = full bounce)
+  };
+
   // CPS = checkpoints per lap. You must pass them all, in order, on the road, or the lap doesn't count
   const TRACK=TRACK1, CPS=16;
   // Laps to win: the track's setting, unless the address ends in ?laps=5 (handy for quick races)
@@ -249,8 +271,13 @@
     } }
   const lapLength=samples.length*samples[0].p.distanceTo(samples[1].p);
 
-  // Grass
-  const grass=new THREE.Mesh(new THREE.PlaneGeometry(900,900),new THREE.MeshLambertMaterial({color:THEME.GROUND}));   // the ground (it was grass in the daytime look)
+  // The ground (it was grass in the daytime look), with a faint glowing grid on it. The grid is a tiny picture of
+  // one square (a line along two of its edges) repeated across the whole ground, every 20 units.
+  const gridTex=(()=>{ const cnv=document.createElement('canvas'); cnv.width=cnv.height=128;
+    const g=cnv.getContext('2d'); g.fillStyle='#000'; g.fillRect(0,0,128,128); g.fillStyle='#fff'; g.fillRect(0,0,128,2); g.fillRect(0,0,2,128);
+    const t=new THREE.CanvasTexture(cnv); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(900/20,900/20);
+    t.anisotropy=renderer.capabilities.getMaxAnisotropy(); return t; })();   // (anisotropy keeps the far-away lines from smearing)
+  const grass=new THREE.Mesh(new THREE.PlaneGeometry(900,900),new THREE.MeshLambertMaterial({color:THEME.GROUND,emissive:THEME.GRID,emissiveMap:gridTex}));
   grass.rotation.x=-Math.PI/2; grass.receiveShadow=true; scene.add(grass);
 
   // Ribbon: a strip of road `count` samples long starting at sample `start`, two vertices per sample
@@ -558,17 +585,69 @@
       sq.position.y=0.04; sq.rotation.y=-Math.atan2(s.t.z,s.t.x); scene.add(sq);
     } }
 
-  // Trees for depth: scattered anywhere that isn't road
-  { let placed=0, tries=0;
-    while(placed<80&&tries<2000){ tries++;
-      const x=(Math.random()-0.5)*(PAGE_W+140), z=(Math.random()-0.5)*(PAGE_H+140);
-      if(nearest(x,z).d<TRACK.width/2+5||overWall(x,z,6)) continue;   // not on the road, not on a bank
-      if((TRACK.deer||[]).some(d=>Math.hypot(x-(d.at[0]-0.5)*PAGE_W,z-(d.at[1]-0.5)*PAGE_H)<TRACK.width/2+12+Math.ceil((d.herd??1)/2)*DEER.GAP)) continue;   // not where a herd of deer waits
-      const trunk=new THREE.Mesh(new THREE.CylinderGeometry(0.4,0.5,3),new THREE.MeshLambertMaterial({color:0x6b4a2b}));
-      const top=new THREE.Mesh(new THREE.ConeGeometry(2.5,6,8),new THREE.MeshLambertMaterial({color:0x2f7a3a}));
-      trunk.position.set(x,1.5,z); top.position.set(x,6,z); top.castShadow=true;
-      scene.add(trunk,top); placed++;
-    } }
+  // ===================== THE CITY =====================
+  // Dice that roll the same numbers every time for the same starting number, so the city doesn't change between races
+  function dice(seed){ return ()=>{ seed=seed+0x6D2B79F5|0; let t=Math.imul(seed^seed>>>15,1|seed); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+  // Buildings: plain boxes of different sizes, in a ring around the outside of the track. They are painted, not lit
+  // (the night would make them as dark as the sky): each face of the box is its own shade so the corners still show.
+  // Every building is the same box stretched to size, drawn all together (instanced), one group per colour.
+  const cityMat=[THEME.BUILDING_A,THEME.BUILDING_B].map(color=>new THREE.MeshBasicMaterial({color,vertexColors:true}));
+  const windowMat=[THEME.WINDOW_A,THEME.WINDOW_B,THEME.WINDOW_C].map(color=>new THREE.MeshBasicMaterial({color,fog:false}));   // (no fog: far-away windows still twinkle)
+  const buildings=[];   // every building: {x, z} = its middle, w and d = how wide and deep, h = how tall. step() uses this to keep cars out
+  { const roll=dice(CITY.SEED), built=buildings;
+    let x0=Infinity, x1=-Infinity, z0=Infinity, z1=-Infinity;   // the box the whole track fits inside
+    for(const s of samples){ x0=Math.min(x0,s.p.x); x1=Math.max(x1,s.p.x); z0=Math.min(z0,s.p.z); z1=Math.max(z1,s.p.z); }
+    const deerSpots=(TRACK.deer||[]).map(d=>({x:(d.at[0]-0.5)*PAGE_W,z:(d.at[1]-0.5)*PAGE_H,r:TRACK.width/2+12+Math.ceil((d.herd??1)/2)*DEER.GAP}));   // where deer wait and cross
+    const out=CITY.BACK+CITY.DEEP;
+    for(let tries=0;built.length<CITY.COUNT&&tries<5000;tries++){
+      const w=12+roll()*14, d=12+roll()*14, h=CITY.LOW+roll()*roll()*(CITY.TALL-CITY.LOW);   // (two rolls multiplied = mostly small numbers, so tall is rare)
+      const x=x0-out+roll()*(x1-x0+2*out), z=z0-out+roll()*(z1-z0+2*out);
+      if(x>x0-CITY.BACK-w/2&&x<x1+CITY.BACK+w/2&&z>z0-CITY.BACK-d/2&&z<z1+CITY.BACK+d/2) continue;   // too close: only around the outside
+      if(deerSpots.some(e=>Math.hypot(x-e.x,z-e.z)<e.r+Math.hypot(w,d)/2)) continue;                    // not where the deer wait
+      if(built.some(b=>Math.abs(b.x-x)<(b.w+w)/2+4&&Math.abs(b.z-z)<(b.d+d)/2+4)) continue;         // not on top of another building
+      built.push({x,z,w,d,h});
+    }
+    // the box: sits on the ground, with a shade per face (right, left, top, bottom, front, back)
+    const box=new THREE.BoxGeometry(1,1,1); box.translate(0,0.5,0);
+    const shade=[1,0.8,1.3,0.5,0.9,0.7], tint=new Float32Array(24*3);
+    for(let v=0;v<24;v++) tint.fill(shade[Math.floor(v/4)],v*3,v*3+3);
+    box.setAttribute('color',new THREE.BufferAttribute(tint,3));
+    const blocks=cityMat.map(mat=>new THREE.InstancedMesh(box,mat,built.length)), used=[0,0];
+    // windows: thin glowing slabs standing just off the walls, on a grid of floors and columns. Only a few are lit
+    const pane=new THREE.BoxGeometry(1,1,1), lights=windowMat.map(mat=>new THREE.InstancedMesh(pane,mat,built.length*12)), lit=[0,0,0];
+    const m=new THREE.Matrix4(), q=new THREE.Quaternion(), at=new THREE.Vector3(), size=new THREE.Vector3();
+    for(const b of built){
+      const c=roll()<0.5?0:1;
+      m.compose(at.set(b.x,0,b.z),q,size.set(b.w,b.h,b.d)); blocks[c].setMatrixAt(used[c]++,m);
+      const floors=Math.floor((b.h-5)/5);
+      for(const [nx,nz,wide] of [[1,0,b.d],[-1,0,b.d],[0,1,b.w],[0,-1,b.w]]){   // the four walls: which way each faces, and how wide it is
+        const cols=Math.floor((wide-3)/5), taken=new Set();
+        if(cols<1||floors<1) continue;
+        for(let n=1+Math.floor(roll()*3);n>0;n--){   // one to three lit windows on this wall
+          const col=Math.floor(roll()*cols), floor=Math.floor(roll()*floors), key=col+floor*100;
+          if(taken.has(key)) continue; taken.add(key);
+          const along=(col-(cols-1)/2)*5, up=5+floor*5, k=roll(), colour=k<0.5?0:k<0.75?1:2;
+          at.set(b.x+nx*b.w/2+nz*along, up, b.z+nz*b.d/2+nx*along);
+          m.compose(at,q,size.set(nx?0.3:2.4,2.6,nz?0.3:2.4)); lights[colour].setMatrixAt(lit[colour]++,m);
+        }
+      }
+    }
+    // (frustumCulled=false: always draw the group. Otherwise the game only checks whether the one un-stretched box is on screen)
+    blocks.forEach((g,c)=>{ g.count=used[c]; g.frustumCulled=false; scene.add(g); });
+    lights.forEach((g,c)=>{ g.count=lit[c]; g.frustumCulled=false; scene.add(g); });
+  }
+  // Stars: dots on a huge dome. The dome moves with whichever camera is being drawn, so the stars always look far
+  // away. They sit low in the sky, because the cameras look down at the cars and only see the sky near the horizon.
+  const starMat=[2,3].map(size=>new THREE.PointsMaterial({color:THEME.STARS,size,sizeAttenuation:false,fog:false}));
+  const stars=new THREE.Group(); scene.add(stars);
+  { const roll=dice(CITY.SEED+1), spots=[[],[]];
+    for(let n=0;n<CITY.STARS;n++){
+      const round=roll()*Math.PI*2, high=(3+roll()*roll()*45)*Math.PI/180;   // which way round the sky, and how high above the horizon
+      spots[n%5===0?1:0].push(Math.cos(round)*Math.cos(high)*400,Math.sin(high)*400,Math.sin(round)*Math.cos(high)*400);   // one star in five is a bigger one
+    }
+    spots.forEach((v,k)=>{ const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(v),3));
+      const dots=new THREE.Points(g,starMat[k]); dots.frustumCulled=false; stars.add(dots); });
+  }
 
   // ===================== TRACK QUERIES =====================
   // Closest centerline sample to a point: its index (how far round the lap) and distance (how far off center).
@@ -830,6 +909,16 @@
       const px0=p.x, pz0=p.z;
       p.x+=c.vx*dt; p.z+=c.vz*dt;
       p.x=Math.max(-440,Math.min(440,p.x)); p.z=Math.max(-440,Math.min(440,p.z));
+      // Buildings are solid. If this move put the car inside one, put it back against the wall it came in through
+      // and turn its speed into that wall into a small bounce. (1.6 = the car's size, the same as in a car-vs-car bump.)
+      for(const b of buildings){
+        const hx=b.w/2+1.6, hz=b.d/2+1.6, dx=p.x-b.x, dz=p.z-b.z;
+        if(Math.abs(dx)>=hx||Math.abs(dz)>=hz||p.y>=b.h) continue;                 // not touching this one
+        const wasOutX=Math.abs(px0-b.x)>=hx, wasOutZ=Math.abs(pz0-b.z)>=hz;        // where was the car a moment ago?
+        const sideWall=wasOutX!==wasOutZ?wasOutX:hx-Math.abs(dx)<hz-Math.abs(dz);  // which wall: the one it just crossed, or the nearest if that's not clear
+        if(sideWall){ const s=Math.sign(wasOutX?px0-b.x:dx)||1; p.x=b.x+s*hx; if(c.vx*s<0) c.vx*=-CITY.BOUNCE; }
+        else        { const s=Math.sign(wasOutZ?pz0-b.z:dz)||1; p.z=b.z+s*hz; if(c.vz*s<0) c.vz*=-CITY.BOUNCE; }
+      }
       // Up and down. On the ground the car follows the ground (a ramp lifts it). When the ground
       // drops away under it (the lip of a ramp) it keeps the upward speed the ramp gave it and flies
       // until gravity brings it back down to whatever is underneath.
@@ -946,7 +1035,10 @@
   // which is why changing ACCEL.THEME in the console shows up straight away.
   function applyTheme(){
     scene.background.set(THEME.SKY); fog.color.set(THEME.FOG);
-    grass.material.color.set(THEME.GROUND);
+    grass.material.color.set(THEME.GROUND); grass.material.emissive.set(THEME.GRID).multiplyScalar(THEME.GRID_POWER);
+    cityMat[0].color.set(THEME.BUILDING_A); cityMat[1].color.set(THEME.BUILDING_B);
+    windowMat[0].color.set(THEME.WINDOW_A); windowMat[1].color.set(THEME.WINDOW_B); windowMat[2].color.set(THEME.WINDOW_C);
+    for(const s of starMat) s.color.set(THEME.STARS);
     for(const m of roadMats) m.color.set(THEME.ROAD);
     hemi.color.set(THEME.AMBIENT_SKY); hemi.groundColor.set(THEME.AMBIENT_GROUND); hemi.intensity=THEME.AMBIENT_POWER;
     sun.color.set(THEME.MOON); sun.intensity=THEME.MOON_POWER; sun.castShadow=!!THEME.SHADOWS;
@@ -965,13 +1057,16 @@
     applyTheme();
     if(overhead){
       scene.fog=null; // fog would hide everything from this high up
+      stars.visible=false;   // (and the map looks down, away from the stars)
       renderer.setScissorTest(false); renderer.setViewport(0,0,w,h); renderer.render(scene,mapCam);
       scene.fog=fog;
     } else {
       renderer.setScissorTest(true);
+      stars.visible=true;
       cars.forEach((c,i)=>{
         const x=i*w/2;
         renderer.setViewport(x,0,w/2,h); renderer.setScissor(x,0,w/2,h);
+        stars.position.copy(c.cam.position);   // the star dome is centred on this player's camera
         renderer.render(scene,c.cam);
       });
     }
@@ -1017,7 +1112,7 @@
 
   // Handy for poking at the game from the browser console
   // e.g. ACCEL.DRIVE.GRIP=0.7 in the console changes the feel instantly, no reload
-  window.ACCEL={TRACK,DRIVE,THEME,ZONE_TYPES,JUMP,HALFPIPE,DEER,deer:herds,zoneAt,rampAt,wallAt,groundAt,groundY,samples,cars,keys,nearest,locate,lapLength,get state(){return state;}};
+  window.ACCEL={TRACK,DRIVE,THEME,ZONE_TYPES,JUMP,HALFPIPE,DEER,CITY,buildings,deer:herds,zoneAt,rampAt,wallAt,groundAt,groundY,samples,cars,keys,nearest,locate,lapLength,get state(){return state;}};
 })();
 </script>
 </body>
